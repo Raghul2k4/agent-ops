@@ -257,6 +257,10 @@ Performed on 2026-10-21 against `https://gflolifmzoadpnezjwtz.supabase.co` (regi
 | `POST /api/v1/workspaces` | 201; membership row with role `owner`; persisted |
 | `GET /api/v1/workspaces/{id}/members` | 200; owner listed |
 | Invalid token | 401 with the standard error envelope |
+| Browser UI sign-in | Password sign-in through the real login form; profile and session restored after reload |
+| Browser UI workspace | `Acme Sales Ops` created through the UI, listed after reload with 1 member and role `owner` |
+| Browser UI sign-out | Redirected to `/login`; a deep link to a workspace while signed out also redirects to `/login` |
+| UI defect found and fixed | `Button` with `asChild` rendered the loading icon plus the child, so Radix Slot rejected two children and the dashboard crashed; fixed and covered by `button.test.tsx` |
 | Test data | Removed afterwards; `auth.users`, `app.*` row counts returned to 0 |
 
 **How the real token was obtained.** The project has `mailer_autoconfirm: false` and no secret key

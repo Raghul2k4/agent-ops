@@ -14,9 +14,9 @@ const buttonVariants = cva(
           'bg-[var(--primary)] text-[var(--primary-foreground)] hover:bg-[var(--primary)]/90 shadow-[var(--shadow-sm)]',
         secondary:
           'bg-[var(--surface-muted)] text-[var(--foreground)] hover:bg-[var(--surface-muted)]/70 border border-[var(--border)]',
-        ghost: 'text-[var(--muted-foreground)] hover:bg-[var(--surface-muted)] hover:text-[var(--foreground)]',
-        danger:
-          'bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90',
+        ghost:
+          'text-[var(--muted-foreground)] hover:bg-[var(--surface-muted)] hover:text-[var(--foreground)]',
+        danger: 'bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90',
         link: 'text-[var(--primary)] underline-offset-4 hover:underline',
       },
       size: {
@@ -34,8 +34,7 @@ const buttonVariants = cva(
 )
 
 export interface ButtonProps
-  extends ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
+  extends ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
   asChild?: boolean
   loading?: boolean
 }
@@ -50,9 +49,24 @@ export function Button({
   children,
   ...props
 }: ButtonProps) {
-  const Component = asChild ? Slot : 'button'
+  if (asChild) {
+    // Radix Slot requires exactly one React element child, so the loading
+    // indicator (which is a second child) must not be rendered here.
+    if (loading) {
+      throw new Error('Button does not support `loading` together with `asChild`.')
+    }
+    return (
+      <Slot
+        className={cn(buttonVariants({ variant, size }), className)}
+        {...props}
+      >
+        {children}
+      </Slot>
+    )
+  }
+
   return (
-    <Component
+    <button
       className={cn(buttonVariants({ variant, size }), className)}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
@@ -60,7 +74,7 @@ export function Button({
     >
       {loading ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
       {children}
-    </Component>
+    </button>
   )
 }
 
