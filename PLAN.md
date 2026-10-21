@@ -289,48 +289,61 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done & verified.
 - [x] Audit repository (empty) and environment (audit table in §1.2)
 - [x] Extract spec requirements → this plan + `docs/roadmap.md` + `docs/architecture.md`
 - [x] Lock architectural decisions (§2) with fallbacks for missing infrastructure (§2.3)
-- [ ] `git init`, `.gitignore` (py/node/env/IDE), `.editorconfig`
-- [ ] `README.md` skeleton, `docs/` scaffold
-- [ ] Record open decisions + blockers (§11)
+- [x] `git init`, `.gitignore` (py/node/env/IDE), `.editorconfig`, `.gitattributes`
+- [x] `README.md`, `docs/` scaffold (`architecture`, `roadmap`, `deployment`)
+- [x] `docs/deployment.md` — local setup including the PostgreSQL credential reset runbook
+- [x] `scripts/bootstrap.ps1` (idempotent setup) and `scripts/verify_env.ps1` (read-only probe)
+- [x] `.env.example` with every configuration key documented
+- [x] Record open decisions + blockers (§11)
 
-**Exit:** repo initialised, plan committed, blockers identified with owners.
-**Verify:** `git status` clean; plan documents reviewed.
+**Exit:** repo initialised, plan committed, blockers identified with owners. **Reached.**
+**Verify:** `git status` clean; `scripts/verify_env.ps1` reports the environment.
+
+> **Delivery note (2026-10-21):** work was paused at the end of M0 by request. The M1
+> scaffold below was started and is committed separately as
+> *"M1 (work in progress): platform foundation scaffold"*. It is **not** a completed
+> milestone: the backend unit tier passes, but the integration tier has not been run
+> (it needs the PostgreSQL password from §11 Q1) and the frontend has not been
+> type-checked or built yet. Treat it as a starting point, not as delivered work.
 
 ---
 
-### M1 — Platform foundation (spec Phase 1)
+### M1 — Platform foundation (spec Phase 1) — *in progress, paused*
 
 Backend
-- [ ] `backend/` package, `pyproject.toml` (ruff, mypy, pytest config), venv on 3.12
-- [ ] `core/config.py` (pydantic-settings; env-prefixed; `.env` support)
-- [ ] `db/session.py` (async engine, pool, `get_session` dependency), `db/base.py`
-- [ ] Alembic scaffold + initial migration (users, workspaces, workspace_members, sessions, api_keys, audit_events)
-- [ ] `core/errors.py` — §27 taxonomy registry; `api/error_handlers.py` → uniform envelope
-- [ ] `core/security.py` — argon2id hashing, session tokens, CSRF double-submit, API-key hashing
-- [ ] `core/permissions.py` — role→permission matrix
-- [ ] `api/v1/deps.py` — current user, workspace resolution, RBAC dependency factories
-- [ ] Auth routes: register/login/logout/me/CSRF; rate-limited; session rotation
-- [ ] Workspaces routes: create/list/get/patch/members (+invite, role change)
-- [ ] `GET /health` (liveness), `GET /ready` (DB + dependency readiness), `GET /api/v1/me`
-- [ ] Request-ID middleware, structlog JSON logging, CORS with explicit origin allowlist
+- [x] `backend/` package, `pyproject.toml` (ruff, mypy, pytest config), venv on 3.12
+- [x] `core/config.py` (pydantic-settings; env-prefixed; `.env` support)
+- [x] `db/session.py` (async engine, pool, `get_session` dependency), `db/base.py`
+- [x] Alembic scaffold + initial migration (users, workspaces, workspace_members, sessions, api_keys, audit_events, workspace_preferences)
+- [x] `core/errors.py` — §27 taxonomy registry; `api/errors.py` → uniform envelope
+- [x] `core/security.py` — argon2id hashing, session tokens, CSRF double-submit, canonical payload hashing
+- [x] `core/permissions.py` — role→permission matrix
+- [x] `api/v1/deps.py` — current identity (session **or** scoped API key), RBAC dependencies, CSRF enforcement
+- [x] Auth routes: register/login/logout/me/csrf; session rotation; audit events
+- [x] Workspaces routes: create/list/get/patch/members (+invite, role change, removal)
+- [x] `GET /health` (liveness), `GET /ready` (DB readiness), `GET /api/v1/me`
+- [x] Request-ID middleware, structlog JSON logging, CORS with explicit origin allowlist
+- [ ] **Not yet executed:** integration + security tiers (blocked on §11 Q1)
 
 Frontend
-- [ ] Vite + React 19 + TS strict + Tailwind v4 + path aliases (`@/`)
-- [ ] Design tokens + base styles + font stack (Inter) + theme toggle
-- [ ] shadcn component set (button/input/select/dialog/dropdown/tooltip/badge/table/skeleton/tabs)
-- [ ] App shell: sidebar (11 areas), header, breadcrumbs, command palette (cmdk), user menu
-- [ ] Auth pages (login/register) + session-expiry handling
-- [ ] Workspace switcher + onboarding empty state
-- [ ] TanStack Query provider, API client with typed error mapping, Zod response validation
-- [ ] Route guards by role, error boundary, 404/403 pages
+- [x] Vite + React 19 + TS strict + Tailwind v4 + path aliases (`@/`)
+- [x] Design tokens + base styles + theme toggle
+- [x] UI primitives: button, input, card, badge, states, field, error boundary
+- [x] App shell: sidebar (11 areas, unavailable modules explicitly marked), header, breadcrumbs slot, command palette (cmdk), user menu
+- [x] Auth pages (login/register) + session-expiry handling + route guards
+- [x] Workspace switcher, workspace creation, workspace detail with member role management
+- [x] TanStack Query provider, API client with typed error mapping and CSRF header
+- [ ] **Not yet executed:** `npm run typecheck`, `npm run build`, unit tests
 
 Infra & CI
-- [ ] `docker-compose.yml` (postgres, redis, backend, web) — authored, CI-verified (D4)
-- [ ] `.env.example`, `scripts/bootstrap.ps1`, `scripts/verify_env.ps1`
-- [ ] GitHub Actions `ci.yml`: ruff, mypy, pytest, web lint/typecheck/build, compose smoke
+- [x] `docker-compose.yml` (postgres, redis, backend, web) — authored, **not verifiable locally** (no Docker)
+- [x] `.env.example`, `scripts/bootstrap.ps1`, `scripts/verify_env.ps1`
+- [x] GitHub Actions `ci.yml`: ruff, mypy, pytest, web lint/typecheck/build, compose smoke
+- [ ] **Not yet executed:** a full green CI run
 
 **Exit:** user can register, log in, create a workspace; `/health` + `/ready` green; CI green.
 **Verify:** `pytest -q`, `npm run lint && npm run typecheck && npm run build`, `docker compose config`.
+**Status:** implementation present, verification incomplete — see the delivery note above.
 
 ---
 

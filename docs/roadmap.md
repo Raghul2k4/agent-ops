@@ -11,8 +11,8 @@ Last updated: 2026-10-21
 
 | Milestone | Spec phase | Status | Exit evidence |
 |---|---|---|---|
-| M0 Foundation & plan | Phase 0 | **Implemented** | `PLAN.md`, `docs/roadmap.md`, `docs/architecture.md`, environment audit |
-| M1 Platform foundation | Phase 1 | Planned | auth + workspace + health/ready + shell + CI green |
+| M0 Foundation & plan | Phase 0 | **Tested** | `PLAN.md`, `docs/roadmap.md`, `docs/architecture.md`, `docs/deployment.md`, `scripts/verify_env.ps1` — environment audit and setup runbook in place |
+| M1 Platform foundation | Phase 1 | **In progress** | scaffold committed; backend unit tier passes (38 tests); integration tier and frontend build not yet executed (blocked on the PostgreSQL password) |
 | M2 Agents, providers, tools, runtime | Phase 2 | Planned | real agent executes a registered tool, run + trace persisted |
 | M3 Safety, approvals, observability | Phase 3 | Planned | approvals bound to canonical hash; security suite green |
 | M4 Workflow builder | Phase 4 | Planned | multi-step workflow built, validated, executed with node traces |
@@ -67,3 +67,10 @@ D4 Docker absent locally, D5 Ollama absent, D6 no cloud key.
 | PostgreSQL 18 credentials unknown (`scram-sha-256`) | blocks M1 migrations and all integration tests | user (Q1) |
 | No cloud provider API key | live-model demo path | user (Q2) |
 | No Docker locally | compose path only verifiable in CI | mitigated (D4) |
+
+## Delivery log
+
+| Date | Milestone | Outcome |
+|---|---|---|
+| 2026-10-21 | M0 | Plan, architecture, roadmap, deployment runbook and setup scripts delivered. Environment audited: PostgreSQL 18 present (password outstanding), Docker/Redis/Ollama absent. |
+| 2026-10-21 | M1 | Work paused by request with the foundation scaffold committed but **unverified** beyond the backend unit tier (38 tests passing). Remaining: integration/security tiers, frontend typecheck/build, CI green. |
