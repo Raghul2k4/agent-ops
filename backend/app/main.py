@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -36,6 +37,12 @@ endpoint is explicitly public.
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: configure logging, dispose the pool on shutdown."""
+    # Provider credentials are referenced by environment-variable name and read
+    # from ``os.environ`` at call time. ``BaseSettings`` reads `.env` for typed
+    # settings but does not export those values, so load the file into the
+    # process environment as well. Real environment variables always win, which
+    # keeps deployments (where `.env` is absent) authoritative.
+    load_dotenv()
     configure_logging(settings.log_level)
     logger.info(
         "app.started",

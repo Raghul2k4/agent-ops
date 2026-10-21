@@ -160,17 +160,59 @@ class InternalError(AppError):
     default_message = "An unexpected error occurred."
 
 
+class ProviderUnavailable(AppError):
+    code = ErrorCode.PROVIDER_UNAVAILABLE
+    default_message = "The model provider is unavailable."
+
+
+class ProviderTimeout(AppError):
+    code = ErrorCode.PROVIDER_TIMEOUT
+    default_message = "The model provider timed out."
+
+
+class InvalidToolArguments(AppError):
+    code = ErrorCode.INVALID_TOOL_ARGUMENTS
+    default_message = "The tool arguments are invalid."
+
+
+class ToolExecutionFailed(AppError):
+    code = ErrorCode.TOOL_EXECUTION_FAILED
+    default_message = "The tool could not be executed."
+
+
+class ExecutionLimitExceeded(AppError):
+    code = ErrorCode.EXECUTION_LIMIT_EXCEEDED
+    default_message = "The run exceeded its configured execution limits."
+
+
+class RunCancelled(AppError):
+    code = ErrorCode.RUN_CANCELLED
+    default_message = "The run was cancelled."
+
+
+class ApprovalRequired(AppError):
+    code = ErrorCode.APPROVAL_REQUIRED
+    default_message = "This action requires human approval before it can run."
+
+
 __all__ = [
     "ERROR_SPECS",
     "AppError",
+    "ApprovalRequired",
     "AuthenticationRequired",
     "ConflictError",
     "ErrorCode",
     "ErrorSpec",
+    "ExecutionLimitExceeded",
     "InternalError",
+    "InvalidToolArguments",
     "PermissionDenied",
     "PolicyViolation",
+    "ProviderTimeout",
+    "ProviderUnavailable",
     "RateLimited",
     "ResourceNotFound",
+    "RunCancelled",
+    "ToolExecutionFailed",
     "ValidationError",
 ]

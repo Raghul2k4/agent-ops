@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 # psycopg's async driver cannot run on the Windows ProactorEventLoop. pytest
@@ -43,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api.v1.deps import get_db
 from app.auth.verify import set_verifier
 from app.core.config import settings
+from app.db import session as db_session_module
 from app.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +56,20 @@ RLS_CHECKS = REPO_ROOT / "supabase" / "tests" / "rls_policies.sql"
 # Every app table is schema-qualified: the connecting role's search_path does
 # not include `app`, and an unqualified name would silently target `public`.
 TRUNCATE_TABLES = (
+    "app.followup_drafts",
+    "app.trace_spans",
+    "app.run_events",
+    "app.agent_runs",
+    "app.agent_tools",
+    "app.agent_versions",
+    "app.agents",
+    "app.crm_contacts",
+    "app.crm_deals",
+    "app.crm_customers",
+    "app.crm_companies",
+    "app.model_configs",
+    "app.model_providers",
+    "app.tool_definitions",
     "app.workspace_preferences",
     "app.audit_events",
     "app.api_keys",
@@ -74,6 +90,17 @@ def pytest_configure(config: pytest.Config) -> None:
 def _sync_dsn(url: str) -> str:
     """Convert a SQLAlchemy URL into the libpq DSN psql expects."""
     return url.replace("+psycopg", "").replace("+asyncpg", "")
+
+
+@contextmanager
+def _runtime_session_factory(factory: async_sessionmaker[AsyncSession]) -> Iterator[None]:
+    """Temporarily point the runtime engine at the test session factory."""
+    previous = db_session_module._session_factory
+    db_session_module._session_factory = factory
+    try:
+        yield
+    finally:
+        db_session_module._session_factory = previous
 
 
 def _find_psql() -> str:
@@ -200,7 +227,11 @@ async def app(session_factory) -> AsyncIterator:  # type: ignore[no-untyped-def]
                 raise
 
     application.dependency_overrides[get_db] = override_get_db
-    yield application
+
+    # Background runtime tasks open their own sessions through the module-level
+    # factory, so point it at the test database for the duration of the test.
+    with _runtime_session_factory(session_factory):
+        yield application
     application.dependency_overrides.clear()
 
 

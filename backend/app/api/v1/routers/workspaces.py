@@ -19,6 +19,7 @@ from app.core.errors import PermissionDenied, ResourceNotFound
 from app.core.logging import get_logger
 from app.core.permissions import Permission, Role, role_has_permission
 from app.models.identity import Profile, WorkspaceMember
+from app.schemas.demo import DemoDatasetRead, DemoSeedResponse
 from app.schemas.identity import (
     MemberInviteRequest,
     MemberRead,
@@ -28,6 +29,7 @@ from app.schemas.identity import (
     WorkspaceUpdateRequest,
 )
 from app.services import audit as audit_service
+from app.services import demo_data as demo_service
 from app.services import workspaces as workspace_service
 
 logger = get_logger(__name__)
@@ -310,6 +312,79 @@ async def remove_member(
     )
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/demo-data",
+    response_model=DemoDatasetRead,
+    summary="Inspect the synthetic demo dataset",
+)
+async def get_demo_dataset(
+    workspace_id: uuid.UUID,
+    context: AuthContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> DemoDatasetRead:
+    """Report whether this workspace contains the explicit demo CRM rows."""
+    require_workspace_scope(context, workspace_id)
+    profile = _require_profile(context)
+    await workspace_service.get_workspace_for_member(
+        session, workspace_id=workspace_id, profile=profile
+    )
+    counts = await demo_service.demo_dataset_status(session, workspace_id)
+    return DemoDatasetRead(
+        seeded=counts["customers"] > 0,
+        customers=counts["customers"],
+        deals=counts["deals"],
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/demo-data",
+    response_model=DemoSeedResponse,
+    summary="Seed the clearly labelled synthetic demo dataset",
+)
+async def seed_demo_dataset(
+    workspace_id: uuid.UUID,
+    context: AuthContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> DemoSeedResponse:
+    """Insert the fictional CRM dataset once per workspace.
+
+    Rows carry ``is_demo = true`` so they can always be distinguished from real
+    records. Nothing is seeded implicitly; the action is audited.
+    """
+    require_workspace_scope(context, workspace_id)
+    profile = _require_profile(context)
+    workspace, role = await workspace_service.get_workspace_for_member(
+        session, workspace_id=workspace_id, profile=profile
+    )
+    _require_workspace_permission(role, Permission.WORKSPACE_UPDATE)
+    result = await demo_service.seed_demo_crm(
+        session, workspace_id=workspace.id, actor_id=profile.id
+    )
+    await audit_service.record_event(
+        session,
+        action="workspace.demo_data_seeded",
+        resource_type="workspace",
+        resource_id=str(workspace.id),
+        workspace_id=workspace.id,
+        actor_id=profile.id,
+        outcome="success",
+        metadata={
+            "created": result.created,
+            "customers": result.customers,
+            "deals": result.deals,
+        },
+    )
+    await session.commit()
+    return DemoSeedResponse(
+        seeded=True,
+        created=result.created,
+        companies=result.companies,
+        customers=result.customers,
+        deals=result.deals,
+        contacts=result.contacts,
+    )
 
 
 __all__ = ["router"]
