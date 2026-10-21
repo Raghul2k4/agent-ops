@@ -1,21 +1,15 @@
-import { useQuery } from '@tanstack/react-query'
-import { Building2, Check, ChevronDown, Plus } from 'lucide-react'
+import { Building2, Check, ChevronDown, Plus, Settings2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { Button } from '@/components/ui/button'
-import { api } from '@/lib/api-client'
-import type { WorkspaceRead } from '@/types/api'
+import { useWorkspace } from '@/features/workspaces/workspace-context'
 import { cn } from '@/lib/utils'
 
 export function WorkspaceSwitcher() {
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-
-  const workspacesQuery = useQuery({
-    queryKey: ['workspaces'],
-    queryFn: () => api.get<WorkspaceRead[]>('/workspaces'),
-  })
+  const { workspaces, activeWorkspace, setActiveWorkspaceId, isLoading } = useWorkspace()
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {
@@ -26,8 +20,6 @@ export function WorkspaceSwitcher() {
     document.addEventListener('mousedown', onPointerDown)
     return () => document.removeEventListener('mousedown', onPointerDown)
   }, [])
-
-  const workspaces = workspacesQuery.data ?? []
 
   return (
     <div className="relative" ref={containerRef}>
@@ -40,7 +32,7 @@ export function WorkspaceSwitcher() {
       >
         <Building2 className="size-3.5 text-[var(--muted-foreground)]" aria-hidden="true" />
         <span className="max-w-40 truncate">
-          {workspaces.length > 0 ? workspaces[0]?.name : 'No workspace'}
+          {isLoading ? 'Loading…' : (activeWorkspace?.name ?? 'No workspace')}
         </span>
         <ChevronDown className="size-3.5 text-[var(--muted-foreground)]" aria-hidden="true" />
       </button>
@@ -56,25 +48,53 @@ export function WorkspaceSwitcher() {
             </p>
           ) : (
             <ul className="max-h-64 overflow-y-auto">
-              {workspaces.map((workspace) => (
-                <li key={workspace.id}>
-                  <Link
-                    role="menuitem"
-                    to={`/workspace/${workspace.id}`}
-                    onClick={() => setOpen(false)}
-                    className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-xs text-[var(--foreground)] hover:bg-[var(--surface-muted)]"
-                  >
-                    <span className="truncate">{workspace.name}</span>
-                    {workspace.role ? (
-                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">
-                        {workspace.role}
+              {workspaces.map((workspace) => {
+                const isActive = workspace.id === activeWorkspace?.id
+                return (
+                  <li key={workspace.id}>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setActiveWorkspaceId(workspace.id)
+                        setOpen(false)
+                      }}
+                      className={cn(
+                        'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-[var(--surface-muted)]',
+                        isActive
+                          ? 'text-[var(--primary)]'
+                          : 'text-[var(--foreground)]',
+                      )}
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        {isActive ? (
+                          <Check className="size-3 shrink-0" aria-hidden="true" />
+                        ) : (
+                          <span className="size-3 shrink-0" aria-hidden="true" />
+                        )}
+                        <span className="truncate">{workspace.name}</span>
                       </span>
-                    ) : null}
-                  </Link>
-                </li>
-              ))}
+                      {workspace.role ? (
+                        <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">
+                          {workspace.role}
+                        </span>
+                      ) : null}
+                    </button>
+                  </li>
+                )
+              })}
             </ul>
           )}
+          {activeWorkspace ? (
+            <div className="mt-1 border-t border-[var(--border)] pt-1">
+              <Button asChild variant="ghost" size="sm" className="w-full justify-start">
+                <Link to={`/workspace/${activeWorkspace.id}`} onClick={() => setOpen(false)}>
+                  <Settings2 className="size-3.5" aria-hidden="true" />
+                  Workspace settings
+                </Link>
+              </Button>
+            </div>
+          ) : null}
           <div className="mt-1 border-t border-[var(--border)] pt-1">
             <Button asChild variant="ghost" size="sm" className="w-full justify-start">
               <Link to="/workspace/new" onClick={() => setOpen(false)}>
@@ -86,14 +106,5 @@ export function WorkspaceSwitcher() {
         </div>
       ) : null}
     </div>
-  )
-}
-
-export function ActiveWorkspaceBadge({ name }: { name: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface-muted)] px-2 py-0.5 text-[11px] text-[var(--muted-foreground)]">
-      <Check className={cn('size-3 text-[var(--success)]')} aria-hidden="true" />
-      {name}
-    </span>
   )
 }

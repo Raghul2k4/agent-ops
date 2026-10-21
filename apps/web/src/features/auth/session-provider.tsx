@@ -26,6 +26,8 @@ interface SessionContextValue {
   workspaces: WorkspaceRead[]
   isLoading: boolean
   isAuthenticated: boolean
+  /** True when a token exists, even if the profile request has not succeeded yet. */
+  hasActiveSession: boolean
   /** How this deployment authenticates browsers, once known. */
   authMode: AuthMode | null
   /** Set when the auth layer cannot be initialised (e.g. missing Supabase env). */
@@ -187,6 +189,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       workspaces: meQuery.data?.workspaces ?? [],
       isLoading: !ready || (hasSession && meQuery.isLoading),
       isAuthenticated: Boolean(meQuery.data?.user),
+      hasActiveSession: hasSession,
       authMode: modeInfo?.auth_mode ?? null,
       configurationError,
       error: meQuery.error instanceof ApiError ? meQuery.error : null,
@@ -209,8 +212,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       signUp,
       signOut,
       queryClient,
-    ],
-  )
+    ],  )
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
 }

@@ -32,13 +32,13 @@ export interface NavigationItem {
  */
 export const NAVIGATION: NavigationItem[] = [
   { id: 'overview', label: 'Overview', path: '/', icon: Gauge, milestone: 'M1', available: true },
-  { id: 'agents', label: 'Agents', path: '/agents', icon: BrainCircuit, milestone: 'M2', available: false },
+  { id: 'agents', label: 'Agents', path: '/agents', icon: BrainCircuit, milestone: 'M2', available: true },
   { id: 'workflows', label: 'Workflows', path: '/workflows', icon: Workflow, milestone: 'M4', available: false },
-  { id: 'runs', label: 'Runs & Traces', path: '/runs', icon: Activity, milestone: 'M3', available: false },
+  { id: 'runs', label: 'Runs & Traces', path: '/runs', icon: Activity, milestone: 'M2', available: true },
   { id: 'evaluations', label: 'Evaluations', path: '/evaluations', icon: FlaskConical, milestone: 'M6', available: false },
-  { id: 'models', label: 'Model Lab', path: '/models', icon: Blocks, milestone: 'M5', available: false },
+  { id: 'models', label: 'Model Lab', path: '/models', icon: Blocks, milestone: 'M2', available: true },
   { id: 'knowledge', label: 'Knowledge & Memory', path: '/knowledge', icon: Library, milestone: 'M6', available: false },
-  { id: 'tools', label: 'Tools & Integrations', path: '/tools', icon: Plug, milestone: 'M2', available: false },
+  { id: 'tools', label: 'Tools & Integrations', path: '/tools', icon: Plug, milestone: 'M2', available: true },
   { id: 'approvals', label: 'Approvals', path: '/approvals', icon: ShieldCheck, milestone: 'M3', available: false },
   { id: 'analytics', label: 'Analytics', path: '/analytics', icon: BarChart3, milestone: 'M5', available: false },
   {

@@ -69,3 +69,255 @@ export interface ReadinessStatus {
   status: string
   checks: Record<string, string>
 }
+
+export interface Page<T> {
+  items: T[]
+  total: number
+  has_more: boolean
+}
+
+/* ------------------------------------------------------------------------- */
+/* Models and providers                                                      */
+/* ------------------------------------------------------------------------- */
+
+export type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'simulation'
+
+export interface ModelCapabilities {
+  /** `null` means unknown - the capability was never confirmed. */
+  supports_tools: boolean | null
+  supports_structured_output: boolean | null
+  supports_streaming: boolean | null
+  context_window: number | null
+}
+
+export interface ModelPricing {
+  input_per_million: number | null
+  output_per_million: number | null
+}
+
+export interface ModelConfigRead {
+  id: string
+  workspace_id: string
+  provider_id: string
+  provider_type: string
+  provider_display_name: string
+  model_name: string
+  display_name: string | null
+  capabilities: Partial<ModelCapabilities>
+  default_parameters: Record<string, unknown>
+  pricing: Partial<ModelPricing>
+  enabled: boolean
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ProviderRead {
+  id: string
+  workspace_id: string
+  provider_type: ProviderType | string
+  display_name: string
+  base_url: string | null
+  /** Environment-variable name only. The credential value is never returned. */
+  secret_reference: string | null
+  has_secret_reference: boolean
+  configuration: Record<string, unknown>
+  status: string
+  last_health_check_at: string | null
+  last_health_error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ProviderWithModels extends ProviderRead {
+  models: ModelConfigRead[]
+}
+
+export interface ProviderTestResult {
+  ok: boolean
+  status: string
+  message: string | null
+  models: string[]
+  checked_at: string
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tools                                                                     */
+/* ------------------------------------------------------------------------- */
+
+export interface ToolDefinitionRead {
+  id: string
+  workspace_id: string | null
+  name: string
+  version: number
+  description: string
+  input_schema: Record<string, unknown>
+  output_schema: Record<string, unknown>
+  risk_level: string
+  required_permissions: string[]
+  requires_approval: boolean
+  timeout_seconds: number
+  max_retries: number
+  idempotent: boolean
+  enabled: boolean
+  is_builtin: boolean
+}
+
+/* ------------------------------------------------------------------------- */
+/* Agents                                                                    */
+/* ------------------------------------------------------------------------- */
+
+export interface ModelParameters {
+  temperature: number
+  top_p: number | null
+  max_output_tokens: number
+  timeout_seconds: number
+}
+
+export interface ExecutionLimits {
+  max_steps: number
+  max_tool_calls: number
+  max_wall_clock_seconds: number
+  max_total_tokens: number
+  max_cost_usd: number
+}
+
+export interface AgentConfiguration {
+  provider_id: string
+  model_config_id: string
+  model_name: string
+  system_prompt: string
+  parameters: ModelParameters
+  limits: ExecutionLimits
+  tool_ids: string[]
+  input_schema: Record<string, unknown> | null
+  output_schema: Record<string, unknown> | null
+  streaming: boolean
+}
+
+export interface AgentRead {
+  id: string
+  workspace_id: string
+  name: string
+  description: string
+  status: string
+  draft_configuration: AgentConfiguration
+  current_published_version_id: string | null
+  current_version_number: number | null
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentVersionRead {
+  id: string
+  workspace_id: string
+  agent_id: string
+  version_number: number
+  configuration: AgentConfiguration
+  configuration_hash: string
+  change_summary: string
+  created_by: string | null
+  created_at: string
+}
+
+export interface AgentTemplateRead {
+  key: string
+  name: string
+  description: string
+  category: string
+  system_prompt: string
+  tool_names: string[]
+  parameters: ModelParameters
+}
+
+/* ------------------------------------------------------------------------- */
+/* Runs and traces                                                           */
+/* ------------------------------------------------------------------------- */
+
+export type RunStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'awaiting_approval'
+
+export interface RunRead {
+  id: string
+  workspace_id: string
+  agent_id: string
+  agent_name: string | null
+  agent_version_id: string
+  version_number: number | null
+  initiated_by: string | null
+  status: RunStatus | string
+  input: Record<string, unknown>
+  output: Record<string, unknown> | null
+  model_config_id: string | null
+  started_at: string | null
+  completed_at: string | null
+  duration_ms: number | null
+  token_usage: {
+    input_tokens?: number
+    output_tokens?: number
+    total_tokens?: number
+    model_calls?: number
+    tool_calls?: number
+    [key: string]: unknown
+  }
+  estimated_cost: number | null
+  error_code: string | null
+  error_summary: string | null
+  replay_of_run_id: string | null
+  created_at: string
+}
+
+export interface RunEventRead {
+  id: string
+  sequence_number: number
+  event_type: string
+  event_status: string
+  payload: Record<string, unknown>
+  occurred_at: string
+}
+
+export interface RunEventList {
+  items: RunEventRead[]
+  last_sequence: number
+  run_status: string
+  has_more: boolean
+}
+
+export interface TraceSpanRead {
+  id: string
+  parent_span_id: string | null
+  span_type: string
+  name: string
+  status: string
+  started_at: string
+  ended_at: string | null
+  duration_ms: number | null
+  attributes: Record<string, unknown>
+}
+
+export interface TraceView {
+  run_id: string
+  spans: TraceSpanRead[]
+}
+
+/* ------------------------------------------------------------------------- */
+/* Synthetic demonstration data                                              */
+/* ------------------------------------------------------------------------- */
+
+export interface DemoDatasetRead {
+  seeded: boolean
+  customers: number
+  deals: number
+}
+
+export interface DemoSeedResponse extends DemoDatasetRead {
+  created: boolean
+  companies: number
+  contacts: number
+}

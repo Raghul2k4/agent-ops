@@ -3,23 +3,44 @@ import type { ReactNode } from 'react'
 
 import { AppShell } from '@/components/layout/app-shell'
 import { ErrorBoundary } from '@/components/ui/error-boundary'
-import { LoadingState } from '@/components/ui/states'
+import { ErrorState, LoadingState } from '@/components/ui/states'
+import { AgentPlaygroundPage } from '@/features/agents/agent-playground-page'
+import { AgentStudioPage } from '@/features/agents/agent-studio-page'
+import { AgentsPage } from '@/features/agents/agents-page'
 import { LoginPage } from '@/features/auth/login-page'
 import { RegisterPage } from '@/features/auth/register-page'
 import { useSession } from '@/features/auth/session-provider'
 import { OverviewPage } from '@/features/dashboard/overview-page'
+import { ProvidersPage } from '@/features/models/providers-page'
+import { RunDetailPage } from '@/features/runs/run-detail-page'
+import { RunsPage } from '@/features/runs/runs-page'
 import { PlannedModulePage } from '@/features/shared/page'
+import { ToolsPage } from '@/features/tools/tools-page'
 import { WorkspaceCreatePage } from '@/features/workspaces/workspace-create-page'
 import { WorkspaceDetailPage } from '@/features/workspaces/workspace-detail-page'
 
 function RequireSession({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading } = useSession()
+  const { isAuthenticated, isLoading, hasActiveSession, error, refresh } = useSession()
   const location = useLocation()
 
   if (isLoading) {
     return <LoadingState label="Checking your session…" />
   }
   if (!isAuthenticated) {
+    // A valid session whose profile could not be loaded is not a sign-out. Only
+    // an explicit rejection sends the user to the sign-in screen; a transient
+    // server error keeps them in place with a retry.
+    if (hasActiveSession && error && !error.isUnauthorized) {
+      return (
+        <div className="mx-auto w-full max-w-2xl px-6 py-16">
+          <ErrorState
+            title="Could not load your profile"
+            message={error.message}
+            onRetry={() => void refresh()}
+          />
+        </div>
+      )
+    }
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
   return <>{children}</>
@@ -44,22 +65,9 @@ export function AppRoutes() {
           <Route path="/workspace/new" element={<WorkspaceCreatePage />} />
           <Route path="/workspace/:workspaceId" element={<WorkspaceDetailPage />} />
 
-          <Route
-            path="/agents"
-            element={
-              <PlannedModulePage
-                title="Agents"
-                milestone="M2"
-                summary="Agent Studio arrives in milestone M2 with versioned configuration, a real playground and the registered tool catalogue."
-                capabilities={[
-                  'Draft and immutable published agent versions with rollback',
-                  'Capability-aware model and parameter selection',
-                  'Playground backed by the real backend runtime, not a mock',
-                  'Eight functional agent templates',
-                ]}
-              />
-            }
-          />
+          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/:agentId" element={<AgentStudioPage />} />
+          <Route path="/agents/:agentId/playground" element={<AgentPlaygroundPage />} />
           <Route
             path="/workflows"
             element={
@@ -76,22 +84,8 @@ export function AppRoutes() {
               />
             }
           />
-          <Route
-            path="/runs"
-            element={
-              <PlannedModulePage
-                title="Runs & Traces"
-                milestone="M3"
-                summary="Run history and hierarchical traces arrive in milestone M3."
-                capabilities={[
-                  'Server-side filtering over persisted runs',
-                  'Hierarchical trace timeline with sanitized payloads',
-                  'Cancellation and safe replay',
-                  'Live updates over SSE with a resumable cursor',
-                ]}
-              />
-            }
-          />
+          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/runs/:runId" element={<RunDetailPage />} />
           <Route
             path="/evaluations"
             element={
@@ -108,22 +102,7 @@ export function AppRoutes() {
               />
             }
           />
-          <Route
-            path="/models"
-            element={
-              <PlannedModulePage
-                title="Model Lab"
-                milestone="M5"
-                summary="Provider configuration, health checks and model comparison arrive in milestones M2 and M5."
-                capabilities={[
-                  'Ollama, OpenAI-compatible and Anthropic adapters with capability metadata',
-                  'Secret storage that never returns a stored credential',
-                  'Side-by-side comparison over identical benchmark cases',
-                  'Cost and latency reporting with sample counts',
-                ]}
-              />
-            }
-          />
+          <Route path="/models" element={<ProvidersPage />} />
           <Route
             path="/knowledge"
             element={
@@ -140,22 +119,7 @@ export function AppRoutes() {
               />
             }
           />
-          <Route
-            path="/tools"
-            element={
-              <PlannedModulePage
-                title="Tools & Integrations"
-                milestone="M2"
-                summary="The tool registry and integration directory arrive in milestone M2."
-                capabilities={[
-                  'Server-side registry with strict argument validation',
-                  'Risk classification and approval requirements per tool',
-                  'Nine built-in CRM tools over synthetic data',
-                  'SSRF-safe generic HTTP connector',
-                ]}
-              />
-            }
-          />
+          <Route path="/tools" element={<ToolsPage />} />
           <Route
             path="/approvals"
             element={

@@ -9,6 +9,8 @@ import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { FieldError, FieldHint, Label } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/features/shared/page'
+import { useSession } from '@/features/auth/session-provider'
+import { useWorkspace } from '@/features/workspaces/workspace-context'
 import { api, ApiError } from '@/lib/api-client'
 import type { WorkspaceRead } from '@/types/api'
 
@@ -21,6 +23,8 @@ type FormValues = z.infer<typeof schema>
 export function WorkspaceCreatePage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { refresh } = useSession()
+  const { setActiveWorkspaceId } = useWorkspace()
   const {
     register,
     handleSubmit,
@@ -35,6 +39,10 @@ export function WorkspaceCreatePage() {
     mutationFn: (payload: { name: string }) =>
       api.post<WorkspaceRead>('/workspaces', payload),
     onSuccess: async (workspace) => {
+      // `/me` carries the membership list the workspace context reads, so it
+      // must be refreshed before the new workspace can become active.
+      await refresh()
+      setActiveWorkspaceId(workspace.id)
       await queryClient.invalidateQueries({ queryKey: ['workspaces'] })
       navigate(`/workspace/${workspace.id}`)
     },
