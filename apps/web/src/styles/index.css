@@ -1,0 +1,216 @@
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+   AgentOps semantic design tokens (`AGENTS.md` §6)
+   Dark-first with a refined light theme. Components must consume these
+   variables - never raw hex values.
+--------------------------------------------------------------------------- */
+
+:root,
+[data-theme='dark'] {
+  --background: #0a0e14;
+  --foreground: #e7eef7;
+  --surface: #10161f;
+  --surface-elevated: #161d28;
+  --surface-muted: #1b2330;
+  --border: #232c3a;
+  --border-strong: #33405280;
+
+  --primary: #58a6ff;
+  --primary-foreground: #04101f;
+  --primary-muted: #58a6ff1f;
+
+  --secondary: #8b7cf6;
+  --secondary-foreground: #0d0a1f;
+
+  --success: #34d399;
+  --success-muted: #34d3991f;
+  --warning: #fbbf24;
+  --warning-muted: #fbbf241f;
+  --danger: #f87171;
+  --danger-muted: #f871711f;
+
+  --muted: #1b2330;
+  --muted-foreground: #8d9bb0;
+
+  --focus-ring: #58a6ff;
+
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 13px;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 8px 24px -12px rgb(0 0 0 / 0.65);
+  --shadow-lg: 0 24px 60px -24px rgb(0 0 0 / 0.8);
+}
+
+[data-theme='light'] {
+  --background: #f6f8fb;
+  --foreground: #0f1720;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-muted: #eef2f7;
+  --border: #d8dee8;
+  --border-strong: #b9c3d1;
+
+  --primary: #1f6feb;
+  --primary-foreground: #ffffff;
+  --primary-muted: #1f6feb14;
+
+  --secondary: #6d5ce0;
+  --secondary-foreground: #ffffff;
+
+  --success: #0f9d58;
+  --success-muted: #0f9d5814;
+  --warning: #b45309;
+  --warning-muted: #b4530914;
+  --danger: #d33a3a;
+  --danger-muted: #d33a3a14;
+
+  --muted: #eef2f7;
+  --muted-foreground: #5b6879;
+
+  --focus-ring: #1f6feb;
+
+  --shadow-sm: 0 1px 2px rgb(15 23 32 / 0.06);
+  --shadow-md: 0 8px 24px -14px rgb(15 23 32 / 0.24);
+  --shadow-lg: 0 24px 60px -30px rgb(15 23 32 / 0.32);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, 'SF Mono', monospace;
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--primary-muted);
+    color: var(--foreground);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+    background-clip: content-box;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+
+  /* Tabular numerals for metric surfaces. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .surface-card {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .animate-in-fade {
+    animation: fade-in 160ms ease-out;
+  }
+
+  .animate-in-rise {
+    animation: rise-in 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,26 @@
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { Toaster } from 'sonner'
+
+import { App } from '@/app/App'
+import '@/styles/index.css'
+
+const container = document.getElementById('root')
+if (!container) {
+  throw new Error('Root element #root was not found in index.html')
+}
+
+createRoot(container).render(
+  <StrictMode>
+    <App />
+    <Toaster
+      position="bottom-right"
+      theme="dark"
+      toastOptions={{
+        classNames: {
+          toast: 'surface-card',
+        },
+      }}
+    />
+  </StrictMode>,
+)
