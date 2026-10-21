@@ -39,7 +39,7 @@ export const NAVIGATION: NavigationItem[] = [
   { id: 'models', label: 'Model Lab', path: '/models', icon: Blocks, milestone: 'M2', available: true },
   { id: 'knowledge', label: 'Knowledge & Memory', path: '/knowledge', icon: Library, milestone: 'M6', available: false },
   { id: 'tools', label: 'Tools & Integrations', path: '/tools', icon: Plug, milestone: 'M2', available: true },
-  { id: 'approvals', label: 'Approvals', path: '/approvals', icon: ShieldCheck, milestone: 'M3', available: false },
+  { id: 'approvals', label: 'Approvals', path: '/approvals', icon: ShieldCheck, milestone: 'M3', available: true },
   { id: 'analytics', label: 'Analytics', path: '/analytics', icon: BarChart3, milestone: 'M5', available: false },
   {
     id: 'workspace',

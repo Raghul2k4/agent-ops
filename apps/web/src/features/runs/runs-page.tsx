@@ -6,6 +6,7 @@ import { Link } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/states'
 import { RunStatusBadge } from '@/components/ui/status'
@@ -18,16 +19,41 @@ import { formatDateTime, formatDuration } from '@/lib/utils'
 
 const STATUSES = ['', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'awaiting_approval']
 
+const ERROR_CODES = [
+  '',
+  'EXECUTION_LIMIT_EXCEEDED',
+  'POLICY_VIOLATION',
+  'INVALID_TOOL_ARGUMENTS',
+  'TOOL_EXECUTION_FAILED',
+  'PROVIDER_UNAVAILABLE',
+  'PROVIDER_TIMEOUT',
+  'APPROVAL_REJECTED',
+  'APPROVAL_EXPIRED',
+  'RUN_CANCELLED',
+]
+
 export function RunsPage() {
   const { activeWorkspace } = useWorkspace()
   const [status, setStatus] = useState('')
+  const [errorCode, setErrorCode] = useState('')
+  const [toolName, setToolName] = useState('')
+  const [fromDate, setFromDate] = useState('')
   const [offset, setOffset] = useState(0)
   const limit = 25
   const workspaceId = activeWorkspace?.id ?? ''
 
   const runs = useQuery({
-    queryKey: ['runs', workspaceId, status, offset],
-    queryFn: () => runsApi.list({ workspaceId, status: status || undefined, limit, offset }),
+    queryKey: ['runs', workspaceId, status, errorCode, toolName, fromDate, offset],
+    queryFn: () =>
+      runsApi.list({
+        workspaceId,
+        status: status || undefined,
+        errorCode: errorCode || undefined,
+        toolName: toolName.trim() || undefined,
+        createdAfter: fromDate ? new Date(`${fromDate}T00:00:00Z`).toISOString() : undefined,
+        limit,
+        offset,
+      }),
     enabled: Boolean(workspaceId),
     retry: false,
     refetchInterval: 15_000,
@@ -58,7 +84,7 @@ export function RunsPage() {
           title="Execution history"
           description="Server-side filtered and paginated over persisted rows."
           actions={
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <ListFilter className="size-3.5 text-[var(--muted-foreground)]" aria-hidden="true" />
               <Select
                 aria-label="Filter by status"
@@ -75,6 +101,41 @@ export function RunsPage() {
                   </option>
                 ))}
               </Select>
+              <Select
+                aria-label="Filter by error category"
+                value={errorCode}
+                className="h-8 w-48 text-xs"
+                onChange={(event) => {
+                  setErrorCode(event.target.value)
+                  setOffset(0)
+                }}
+              >
+                {ERROR_CODES.map((value) => (
+                  <option key={value} value={value}>
+                    {value === '' ? 'All error categories' : value.replace(/_/g, ' ')}
+                  </option>
+                ))}
+              </Select>
+              <Input
+                aria-label="Filter by tool"
+                placeholder="tool name"
+                value={toolName}
+                className="h-8 w-36 text-xs"
+                onChange={(event) => {
+                  setToolName(event.target.value)
+                  setOffset(0)
+                }}
+              />
+              <Input
+                aria-label="Filter by start date"
+                type="date"
+                value={fromDate}
+                className="h-8 w-36 text-xs"
+                onChange={(event) => {
+                  setFromDate(event.target.value)
+                  setOffset(0)
+                }}
+              />
             </div>
           }
         />

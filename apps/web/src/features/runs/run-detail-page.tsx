@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Ban, Clock, FlaskConical, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Ban, Clock, FlaskConical, RefreshCw, RotateCcw, ShieldAlert } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 
 import { Badge } from '@/components/ui/badge'
@@ -10,9 +10,11 @@ import { ErrorState, LoadingState } from '@/components/ui/states'
 import { Notice, RunStatusBadge } from '@/components/ui/status'
 import { PageHeader } from '@/features/shared/page'
 import { runsApi } from '@/features/runs/api'
+import { useRunEventStream } from '@/features/runs/use-run-event-stream'
 import { useWorkspace } from '@/features/workspaces/workspace-context'
 import { ApiError } from '@/lib/api-client'
 import { formatDateTime, formatDuration } from '@/lib/utils'
+import type { RunEventList } from '@/types/api'
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'awaiting_approval'])
 
@@ -43,6 +45,23 @@ export function RunDetailPage() {
     refetchInterval: () => (active ? 900 : false),
   })
 
+  // Live updates: the server pushes new events and the client recovers any
+  // it missed with the sequence cursor.
+  useRunEventStream(runId, (incoming) => {
+    queryClient.setQueryData<RunEventList>(['run-events', runId], (current) => {
+      if (!current) return current
+      const known = new Set(current.items.map((item) => item.id))
+      const fresh = incoming.filter((item) => !known.has(item.id))
+      if (fresh.length === 0) return current
+      return {
+        ...current,
+        items: [...current.items, ...fresh].sort((a, b) => a.sequence_number - b.sequence_number),
+        last_sequence: Math.max(current.last_sequence, ...fresh.map((item) => item.sequence_number)),
+      }
+    })
+    void runQuery.refetch()
+  })
+
   const traceQuery = useQuery({
     queryKey: ['run-trace', runId],
     queryFn: () => runsApi.trace(runId),
@@ -55,6 +74,14 @@ export function RunDetailPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['run', runId] })
       await queryClient.invalidateQueries({ queryKey: ['runs'] })
+    },
+  })
+
+  const replay = useMutation({
+    mutationFn: () => runsApi.replay(runId),
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['runs'] })
+      await queryClient.invalidateQueries({ queryKey: ['run', created.id] })
     },
   })
 
@@ -131,6 +158,16 @@ export function RunDetailPage() {
             <Button
               size="sm"
               variant="secondary"
+              loading={replay.isPending}
+              disabled={!can('run.execute') || replay.isPending}
+              onClick={() => replay.mutate()}
+            >
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+              Replay safely
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
               onClick={() => {
                 void runQuery.refetch()
                 void eventsQuery.refetch()
@@ -149,6 +186,23 @@ export function RunDetailPage() {
           </div>
         }
       />
+
+      {replay.isError ? (
+        <Notice tone="danger" title="The replay was not started" className="mb-4">
+          {replay.error instanceof ApiError ? replay.error.message : 'The replay could not start.'}
+        </Notice>
+      ) : null}
+
+      {replay.isSuccess ? (
+        <Notice tone="info" title="Safe replay started" className="mb-4">
+          A new run was created from this one. Tools that change a business record still need a
+          fresh approval.{' '}
+          <Link className="text-[var(--primary)] hover:underline" to={`/runs/${replay.data.id}`}>
+            Open the replay
+          </Link>
+          .
+        </Notice>
+      ) : null}
 
       {cancel.isError ? (
         <Notice tone="danger" title="Cancellation failed" className="mb-4">
@@ -191,11 +245,41 @@ export function RunDetailPage() {
                   <p>
                     <code className="font-mono">{String(pendingApproval.tool)}</code> is classified
                     as {String(pendingApproval.risk_level)} risk. The run paused before execution;
-                    the business record is unchanged. Approval decisions arrive in milestone M3.
+                    the business record is unchanged.
                   </p>
                   <p className="mt-1 break-all font-mono text-[10px]">
                     payload hash: {String(pendingApproval.canonical_arguments_hash)}
                   </p>
+                  {run.pending_approval_id ? (
+                    <p className="mt-2">
+                      <Link
+                        className="inline-flex items-center gap-1 text-[var(--primary)] hover:underline"
+                        to="/approvals"
+                      >
+                        <ShieldAlert className="size-3" aria-hidden="true" />
+                        Review it in the approval queue
+                      </Link>
+                    </p>
+                  ) : null}
+                </Notice>
+              ) : null}
+
+              {run.replay_mode ? (
+                <Notice tone="info" title="Safe replay">
+                  This run replays an earlier run. Tools that change a business record were not
+                  repeated: they wait for a fresh decision.
+                  {run.replay_of_run_id ? (
+                    <>
+                      {' '}
+                      <Link
+                        className="text-[var(--primary)] hover:underline"
+                        to={`/runs/${run.replay_of_run_id}`}
+                      >
+                        Open the source run
+                      </Link>
+                      .
+                    </>
+                  ) : null}
                 </Notice>
               ) : null}
 

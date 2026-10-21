@@ -270,6 +270,10 @@ export interface RunRead {
   error_code: string | null
   error_summary: string | null
   replay_of_run_id: string | null
+  /** The approval request this run is waiting for, when it is paused. */
+  pending_approval_id: string | null
+  /** True when the run is a safe replay of an earlier run. */
+  replay_mode: boolean
   created_at: string
 }
 
@@ -304,6 +308,71 @@ export interface TraceSpanRead {
 export interface TraceView {
   run_id: string
   spans: TraceSpanRead[]
+}
+
+/* ------------------------------------------------------------------------- */
+/* Workspace policy and approvals                                             */
+/* ------------------------------------------------------------------------- */
+
+export type ApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'changes_requested'
+  | 'expired'
+  | 'executed'
+  | 'revoked'
+
+export type ApprovalDecision = 'approve' | 'reject' | 'request_changes'
+
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical'
+
+export interface PolicyRead {
+  workspace_id: string
+  version: number
+  tool_allowlist: string[]
+  blocked_tools: string[]
+  disabled_agent_ids: string[]
+  require_approval_for_risk_levels: RiskLevel[]
+  tool_rate_limits: Record<string, number>
+  max_tool_calls_per_run: number | null
+  max_runs_per_hour: number | null
+  approval_ttl_minutes: number
+  execution_paused: boolean
+  paused_reason: string | null
+  updated_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ApprovalRead {
+  id: string
+  workspace_id: string
+  run_id: string
+  agent_version_id: string | null
+  tool_definition_id: string | null
+  tool_name: string
+  risk_level: RiskLevel | string
+  /** SHA-256 of the canonical payload. A decision must quote this exact hash. */
+  canonical_arguments_hash: string
+  arguments: Record<string, unknown>
+  requested_by: string | null
+  status: ApprovalStatus | string
+  decision: string | null
+  decided_by: string | null
+  decided_at: string | null
+  review_note: string | null
+  policy_version: number
+  expires_at: string
+  created_at: string
+  is_expired: boolean
+}
+
+export interface ApprovalDecisionResponse {
+  approval: ApprovalRead
+  run_status: string
+  run_id: string
+  message: string
 }
 
 /* ------------------------------------------------------------------------- */

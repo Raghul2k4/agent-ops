@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/states'
 import { PageHeader } from '@/features/shared/page'
+import { PolicyPanel } from '@/features/policies/policy-panel'
 import { api, ApiError } from '@/lib/api-client'
 import type { MemberRead, WorkspaceRead } from '@/types/api'
 import { formatDateTime } from '@/lib/utils'
@@ -152,6 +153,8 @@ export function WorkspaceDetailPage() {
           </ul>
         )}
       </Card>
+
+      <PolicyPanel />
     </div>
   )
 }

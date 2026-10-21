@@ -7,6 +7,7 @@ import { ErrorState, LoadingState } from '@/components/ui/states'
 import { AgentPlaygroundPage } from '@/features/agents/agent-playground-page'
 import { AgentStudioPage } from '@/features/agents/agent-studio-page'
 import { AgentsPage } from '@/features/agents/agents-page'
+import { ApprovalsPage } from '@/features/approvals/approvals-page'
 import { LoginPage } from '@/features/auth/login-page'
 import { RegisterPage } from '@/features/auth/register-page'
 import { useSession } from '@/features/auth/session-provider'
@@ -120,6 +121,7 @@ export function AppRoutes() {
             }
           />
           <Route path="/tools" element={<ToolsPage />} />
+          <Route path="/approvals" element={<ApprovalsPage />} />
           <Route
             path="/approvals"
             element={

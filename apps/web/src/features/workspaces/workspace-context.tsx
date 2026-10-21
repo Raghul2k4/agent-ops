@@ -13,6 +13,9 @@ export type WorkspacePermission =
   | 'tool.write'
   | 'run.execute'
   | 'run.cancel'
+  | 'run.read'
+  | 'approval.read'
+  | 'approval.decide'
   | 'workspace.update'
 
 const WRITE_ROLES: WorkspaceRole[] = ['owner', 'admin', 'developer']
@@ -29,7 +32,11 @@ export function roleCan(role: WorkspaceRole | null, permission: WorkspacePermiss
       return WRITE_ROLES.includes(role)
     case 'run.execute':
     case 'run.cancel':
+    case 'approval.decide':
       return RUN_ROLES.includes(role)
+    case 'run.read':
+    case 'approval.read':
+      return true
     case 'workspace.update':
       return role === 'owner' || role === 'admin'
     default:

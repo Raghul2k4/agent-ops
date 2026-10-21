@@ -67,6 +67,16 @@ export function setAccessTokenProvider(provider: AccessTokenProvider | null): vo
   accessTokenProvider = provider
 }
 
+/**
+ * Read the current access token.
+ *
+ * Used by the Server-Sent Events client, which cannot set an `Authorization`
+ * header the way `fetch` does with `EventSource`.
+ */
+export async function getAccessToken(): Promise<string | null> {
+  return accessTokenProvider ? accessTokenProvider() : null
+}
+
 export interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown
   /** Send a JSON body (default) or a raw body (e.g. FormData). */
