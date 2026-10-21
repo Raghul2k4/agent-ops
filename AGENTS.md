@@ -177,6 +177,7 @@ Use this stack unless the existing repository has a compelling, documented reaso
 - Recharts for analytics
 - A suitable lightweight state-management solution when shared client state requires it
 - Playwright for end-to-end testing
+- `@supabase/supabase-js` for identity, object storage and realtime only (publishable key)
 
 Use accessible semantic HTML and reusable components. Do not create a separate styling approach for every screen.
 
@@ -187,12 +188,13 @@ Use accessible semantic HTML and reusable components. Do not create a separate s
 - Pydantic for schemas and validation
 - Pydantic Settings for environment configuration
 - SQLAlchemy 2.x
-- Alembic migrations
-- PostgreSQL
+- Supabase CLI SQL migrations (`supabase/migrations/*.sql`) as the single schema authority
+- PostgreSQL via Supabase (Supabase Postgres), reached through the Supabase transaction pooler
 - Async database access where appropriate
 - HTTPX for asynchronous HTTP calls
 - Pytest and pytest-asyncio
 - Structured application logging
+- Supabase access-token verification (JWKS) for every authenticated request
 
 ## AI infrastructure
 
@@ -208,11 +210,14 @@ Never assume every model supports tool calling, structured outputs, streaming, o
 
 ## Data and background execution
 
-- PostgreSQL as the primary source of truth
-- pgvector for initial vector search
-- Redis-backed queue and worker infrastructure when background execution requires it
-- Object storage abstraction for uploaded documents and artifacts
-- A durable workflow engine such as Temporal when long-running workflows require recovery across process restarts
+- **Supabase** as the application platform (Postgres, Auth, Storage, Realtime, Queues)
+- Supabase Postgres as the primary source of truth
+- pgvector for vector search, enabled through `create extension vector with schema extensions`
+- Supabase Queues (`pgmq`) for durable background job processing
+- `pg_cron` for schedules and `pg_net` for outbound webhook dispatch
+- Supabase Storage for uploaded documents and artifacts, behind an object-storage abstraction
+- Supabase Realtime for live execution events
+- A durable workflow engine such as Temporal only when long-running workflows require recovery across process restarts
 
 Do not introduce every infrastructure component on day one without need. However, design execution interfaces so that in-process development execution can evolve into durable background execution without rewriting business logic.
 
@@ -221,12 +226,150 @@ Do not introduce every infrastructure component on day one without need. However
 - Docker and Docker Compose
 - Environment-based configuration
 - CI pipeline
-- Database migrations
+- Supabase database migrations (`supabase db push`) and linked environments
 - Health and readiness checks
 - Structured logs
 - Metrics and tracing interfaces
 - OpenTelemetry-compatible observability where practical
-- Automated backup and restore documentation
+- Automated backup and restore documentation, including Supabase point-in-time recovery
+
+---
+
+# 4A. SUPABASE PLATFORM INTEGRATION
+
+AgentOps runs on **Supabase** as its application platform. The Python/FastAPI service remains the
+only business-logic API and the React/TypeScript application remains the only UI. Supabase supplies
+the database, identity, object storage, realtime messaging, durable queues and scheduling.
+
+## 4A.1 Role boundary
+
+| Concern | Owner |
+|---|---|
+| Identity (sign-up, sign-in, refresh, MFA, password reset) | Supabase Auth |
+| Authoritative domain data | Supabase Postgres |
+| Row-level enforcement | Postgres Row Level Security |
+| Object storage (documents, artifacts) | Supabase Storage |
+| Live execution events | Supabase Realtime |
+| Durable background jobs | Supabase Queues (`pgmq`) |
+| Schedules and outbound webhooks | `pg_cron` and `pg_net` |
+| Vector search | pgvector |
+| Business logic, orchestration, agent runtime | FastAPI (Python) |
+
+Never move domain behaviour into Postgres functions, Edge Functions or the browser. The FastAPI
+service is the API surface; the Data API (PostgREST) is disabled for domain tables.
+
+## 4A.2 Repository layout
+
+    supabase/
+    ├── config.toml              # project configuration (local stack, ports, auth settings)
+    ├── migrations/              # schema authority: *.sql applied by `supabase db push`
+    ├── seed.sql                 # reference and demo seed applied after `supabase db reset`
+    └── tests/                   # RLS and policy regression SQL executed in CI
+
+## 4A.3 Connection and pooling
+
+- The application connects to Supabase Postgres through the **transaction pooler**
+  (`SUPABASE_POOLER_URL`, port 6543) using async `psycopg`.
+- The **direct** connection (`SUPABASE_DB_URL`, port 5432) is reserved for migrations, advisory
+  administration and schema tooling.
+- Never rely on session-level state across pooled transactions; use `FOR UPDATE SKIP LOCKED` or
+  explicit row locks instead of advisory locks for job claiming.
+- Set `statement_timeout` and `idle_in_transaction_session_timeout` deliberately and keep model
+  calls outside database transactions.
+
+## 4A.4 Schema and migration rules
+
+- All domain tables live in the **`app`** schema. `auth`, `storage` and `extensions` are reserved
+  for their platform owners.
+- Migrations are plain SQL files in `supabase/migrations/`, applied with `supabase db push`.
+  Alembic (or any other migration tool) must not be used in parallel — one schema authority only.
+- Every migration that creates a table also creates its indexes, constraints, RLS enablement and
+  its policies, in the same file.
+- Use `supabase migration new <name>` to create migration files; never invent a filename or format.
+- Extension installation must not pin a version (`create extension vector with schema extensions`).
+- Run `supabase db lint` and the database advisors before pushing; fix findings rather than
+  suppressing them.
+- Schema changes must never destroy user data without an explicit, documented migration path.
+
+## 4A.5 Authentication rules
+
+- The browser signs in through `@supabase/supabase-js` using the **publishable** key.
+- The API accepts `Authorization: Bearer <supabase access token>` and verifies the token
+  **cryptographically** using the project's JWKS (`{SUPABASE_URL}/auth/v1/.well-known/jwks.json`),
+  checking `iss`, `aud` and `exp`. A shared-secret HS256 token is verified against the Auth server,
+  never by trusting a header.
+- The token subject (`sub`, i.e. `auth.users.id`) is the identity key. Authorization data belongs in
+  application tables (`app.workspace_members`), never in user-editable `user_metadata`.
+- Token verification must not be skipped for any protected route, including WebSocket, SSE and
+  background-job entry points.
+- Because API calls are authenticated with a bearer token rather than an ambient cookie, cookie
+  CSRF protections are not required. If a cookie-based session is ever introduced, CSRF protection,
+  `Secure`/`HttpOnly`/`SameSite` attributes and session rotation are mandatory.
+- Deleting a user does not invalidate issued access tokens; sensitive operations re-check membership
+  server-side, and access tokens stay short-lived with automatic refresh.
+- Rate-limit authentication endpoints and never reveal whether an account exists.
+
+## 4A.6 Row Level Security requirements
+
+These are mandatory and are verified by CI.
+
+1. Enable RLS on **every** table and view: `alter table ... enable row level security;`.
+2. Target roles explicitly (`to authenticated`). `auth.role()` is deprecated and must not be used.
+3. `to authenticated` alone is authentication, not authorization. Every policy also carries an
+   ownership or workspace-membership predicate, for example
+   `workspace_id in (select workspace_id from app.workspace_members where user_id = (select auth.uid()) and status = 'active')`.
+4. `UPDATE` policies provide both `using` and `with check`; without `with check` a user could
+   reassign a row to another owner.
+5. `UPDATE` requires a matching `SELECT` policy, otherwise updates silently affect zero rows.
+6. Views are created `with (security_invoker = true)`. Helper functions are `security invoker`
+   unless they live in a non-exposed schema, in which case they must contain an explicit
+   `auth.uid()` check and must not be granted to `PUBLIC`.
+7. `security definer` functions are never used to silence a permission error.
+8. Domain tables are not exposed to the Data API: no grants to `anon`/`authenticated`, default
+   privileges revoked in the `app` schema, and the Data API disabled in project settings.
+9. Storage objects follow the same rule: private buckets, membership-bound policies, and signed
+   URLs; `upsert` requires `insert` + `select` + `update` grants.
+
+## 4A.7 Storage rules
+
+- Knowledge documents and artifacts are stored in **private** buckets; there are no public object
+  URLs and no public bucket listings.
+- The browser uploads through short-lived signed upload URLs minted by FastAPI after a permission
+  check; the backend stores only the `storage_reference`.
+- Downloads use short-lived signed URLs minted after a workspace-membership check.
+- File size limits, file-type validation and content sniffing happen server-side before a document
+  is accepted for ingestion.
+
+## 4A.8 Realtime and events
+
+- Execution events are persisted first (`run_events` with a monotonic sequence number) and then
+  broadcast on a Realtime channel scoped to the run.
+- Clients recover missed events with a cursor (`after_seq`) rather than relying on socket
+  continuity.
+- Realtime authorization must restrict channels to workspace members.
+
+## 4A.9 Queues, schedules and webhooks
+
+- Durable work is queued in `pgmq`; workers claim messages atomically, apply bounded retries with
+  exponential backoff and jitter, and move exhausted work to a dead-letter state.
+- Recurring work is scheduled with `pg_cron` using timezone-aware expressions.
+- Outbound webhooks are dispatched with `pg_net` and are signed; replay windows are enforced.
+
+## 4A.10 Environments and secret handling
+
+- Supported environments: local Supabase stack (`supabase start`), a linked hosted project for
+  development, and a separate hosted project for CI.
+- Server-only configuration: `SUPABASE_SECRET_KEY`, `SUPABASE_DB_PASSWORD`, `SUPABASE_DB_URL`,
+  `SUPABASE_POOLER_URL`, `SUPABASE_ACCESS_TOKEN`.
+- Browser-safe configuration: `SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`.
+- The secret key must never appear in browser code, client bundles, logs, traces, error messages or
+  test fixtures. The publishable key is public by design and is safe only because RLS is enabled.
+- CI authenticates with a **scoped** personal access token limited to the required projects and
+  permissions; never use a classic full-access personal access token.
+- `.env.example` lists variable names only, with no real values.
+- Key rotation procedures (publishable, secret, database password, access token) are documented in
+  `docs/security.md`, including how to keep the application working during rotation.
+- A build-time check must fail the release if the secret key is found in the frontend bundle.
 
 ---
 
@@ -280,6 +423,7 @@ A suggested structure:
     │   │   ├── policies/
     │   │   ├── approvals/
     │   │   ├── jobs/
+    │   │   ├── auth/
     │   │   ├── observability/
     │   │   └── main.py
     │   └── tests/
@@ -287,6 +431,11 @@ A suggested structure:
     │       ├── integration/
     │       ├── security/
     │       └── evaluations/
+    ├── supabase/
+    │   ├── config.toml
+    │   ├── migrations/
+    │   ├── seed.sql
+    │   └── tests/
     ├── evals/
     │   ├── datasets/
     │   ├── suites/
@@ -299,6 +448,7 @@ A suggested structure:
     │   ├── security.md
     │   ├── design-system.md
     │   ├── deployment.md
+    │   ├── supabase.md
     │   └── roadmap.md
     ├── infra/
     ├── scripts/
@@ -306,6 +456,7 @@ A suggested structure:
     ├── .gitignore
     ├── docker-compose.yml
     ├── README.md
+    ├── PLAN.md
     └── AGENTS.md
 
 Adapt this structure when necessary, but preserve clear boundaries between UI, API, execution logic, provider adapters, policies, and persistence.
@@ -1449,15 +1600,22 @@ Every workspace-owned record must be scoped appropriately.
 
 ## Authentication
 
-Use secure sessions or a suitable managed identity provider.
+Use a suitable managed identity provider. AgentOps uses **Supabase Auth**; the FastAPI service
+verifies the signed access token on every protected request (see §4A.5).
 
-For cookie-based sessions:
+- Verify access tokens cryptographically against the project's signing keys, checking issuer, audience and expiry.
+- Derive the identity from the verified token subject; never from a client-supplied header or body field.
+- Keep authorization data in application tables; never trust user-editable profile metadata for authorization decisions.
+- Enforce session expiration and short access-token lifetimes with automatic refresh.
+- Rate-limit authentication endpoints and never disclose whether an account exists.
+- Re-check membership server-side for sensitive operations; deleting a user does not invalidate already-issued tokens.
+
+For cookie-based sessions (only if one is introduced later):
 
 - Use appropriate Secure, HttpOnly, and SameSite settings.
 - Implement CSRF protection where applicable.
 - Rotate session identifiers appropriately.
 - Enforce session expiration.
-- Rate-limit authentication endpoints.
 
 Do not invent an authentication implementation that merely trusts a user ID from request headers.
 
@@ -1519,6 +1677,13 @@ Never return secret values after creation. Display them once where appropriate a
 
 Use PostgreSQL with UUID primary keys where appropriate, UTC timestamps, migrations, explicit relationships, and carefully chosen indexes.
 
+The database is **Supabase Postgres**. Domain tables live in the `app` schema and are created and
+changed through SQL migrations in `supabase/migrations/` applied by `supabase db push`; no other
+migration tool may run in parallel. Every table enables Row Level Security and carries
+workspace-scoped policies that mirror the API's own authorization rules (§4A.4, §4A.6). Identities
+come from `auth.users`; application tables reference that identifier instead of duplicating
+credentials.
+
 Every tenant-owned entity must have an appropriate workspace boundary.
 
 Create these entities or their justified equivalents.
@@ -1526,6 +1691,9 @@ Create these entities or their justified equivalents.
 ## Identity and workspace
 
 ### `users`
+
+Supabase-managed `auth.users` is the identity record. Mirror only the profile data the product
+needs in `app.profiles` and never store credentials or provider secrets in application tables.
 
 - id
 - email
@@ -1843,6 +2011,10 @@ Audit events should be append-only through normal application operations.
 - embedding
 - created_at
 
+The embedding column uses the pgvector type (`extensions.vector(<dimension>)`) with an HNSW index
+for cosine similarity, and the dimension is validated against the configured embedding model.
+Keyword matching uses a full-text/`pg_trgm` companion column for hybrid retrieval.
+
 ### `memory_records`
 
 - id
@@ -1906,6 +2078,10 @@ Use a consistent versioned prefix:
 `/api/v1`
 
 Implement REST endpoints with typed request and response schemas.
+
+Protected endpoints authenticate with `Authorization: Bearer <supabase access token>`. The FastAPI
+service is the only domain API: the Supabase Data API stays disabled for domain tables so there is
+a single authorization surface, and the browser never queries domain data directly (§4A.1).
 
 ## System and authentication
 
@@ -2064,10 +2240,23 @@ Security is a foundational requirement, not a final polish task.
 
 - Enforce tenant boundaries in backend services and queries.
 - Add database constraints where appropriate.
-- Consider PostgreSQL row-level security as an additional layer.
+- Treat PostgreSQL row-level security as a mandatory second layer, not an optional extra: enable it on every table and mirror the API's authorization rules in policies (§4A.6).
 - Use parameterized queries.
 - Prevent cross-tenant access through direct IDs, search, exports, background jobs, and trace links.
-- Test unauthorized access attempts.
+- Test unauthorized access attempts, including attempts that go directly to the database.
+
+## Supabase platform security
+
+- The publishable key is public; the secret key is not. The secret key must never appear in browser code, client bundles, logs, traces, error messages, screenshots or test fixtures.
+- Verify Supabase access tokens cryptographically on every protected request; never trust an identity taken from a header, claim or body field.
+- Keep authorization decisions out of user-editable metadata; store roles and membership in application tables.
+- Keep domain tables unreachable through the Data API: no grants to `anon`/`authenticated`, revoked default privileges in the `app` schema, and the Data API disabled in project settings.
+- Scope every storage bucket privately, with membership-bound policies and short-lived signed URLs.
+- Restrict realtime channels to authorized workspace members.
+- Use scoped personal access tokens for the CLI, MCP and CI; never a classic full-access token.
+- Run `supabase db lint` and the database advisors in CI, and treat findings as build failures.
+- Document and rehearse key rotation (publishable, secret, database password, access token) so the application keeps working during rotation.
+- Review the security implications of every function, view and trigger: `security invoker` by default, `security definer` only inside a non-exposed schema with an explicit identity check, and views created `with (security_invoker = true)`.
 
 ## Execution security
 
@@ -2393,6 +2582,7 @@ Document:
 - Indexes
 - Migrations
 - Retention rules
+- The Row Level Security policy applied to each table
 
 ## `docs/api-reference.md`
 
@@ -2400,11 +2590,26 @@ Document routes, schemas, permissions, error codes, pagination, and examples.
 
 ## `docs/security.md`
 
-Document threat model, authorization, tool safety, secret handling, approval semantics, and operational controls.
+Document threat model, authorization, tool safety, secret handling, approval semantics, and operational controls. Include the Supabase key model, the RLS policy strategy, and key rotation procedures.
 
 ## `docs/design-system.md`
 
 Document colors, typography, spacing, components, layouts, motion, accessibility, and responsive behavior.
+
+## `docs/supabase.md`
+
+Document the Supabase integration:
+
+- Project layout, linked environments, and how migrations are applied
+- The `app` schema strategy and why domain tables are not exposed to the Data API
+- Extension usage (pgvector, pg_trgm, pgmq, pg_cron, pg_net)
+- Authentication flow, token verification, and session handling
+- The RLS policy catalogue and how to add a policy for a new table
+- Storage buckets, signed URLs, and document ingestion
+- Realtime channels and event cursor recovery
+- Queue, schedule, and webhook conventions
+- The local stack workflow (`supabase start`) and the hosted-project fallback
+- Key inventory, rotation, and the environment variable matrix
 
 ## `docs/roadmap.md`
 
@@ -2441,11 +2646,13 @@ Deliverable: a practical implementation plan grounded in the actual repository.
 - Establish frontend and backend structure.
 - Configure linting and formatting.
 - Configure environment settings.
-- Set up database connection and migrations.
+- Provision or link the Supabase project and configure the environment matrix.
+- Set up the database connection (transaction pooler) and SQL migrations in `supabase/migrations/`.
+- Create the `app` schema, enable extensions, and write the first migration with RLS policies.
 - Add health and readiness endpoints.
-- Implement authentication and workspace boundaries.
+- Implement authentication (Supabase Auth token verification) and workspace boundaries.
 - Establish the design system and application shell.
-- Add CI checks.
+- Add CI checks, including `supabase db lint` and the RLS policy tests.
 
 Deliverable: the application starts reliably and has a secure foundational structure.
 
@@ -2459,6 +2666,7 @@ Deliverable: the application starts reliably and has a secure foundational struc
 - Implement the tool registry.
 - Add the synthetic CRM dataset.
 - Build agent execution and persistence.
+- Persist execution events and broadcast them over Supabase Realtime.
 
 Deliverable: a real agent can use a registered tool and return a persisted result.
 
@@ -2471,7 +2679,7 @@ Deliverable: a real agent can use a registered tool and return a persisted resul
 - Persist trace events.
 - Build run history and trace details.
 - Add safe error handling.
-- Test tenant isolation and protected actions.
+- Test tenant isolation and protected actions, at the API layer and directly against the database through RLS.
 
 Deliverable: executions are inspectable, bounded, and controlled.
 
@@ -2504,17 +2712,17 @@ Deliverable: users can understand actual platform behavior and compare model per
 - Implement evaluation suites and cases.
 - Implement deterministic evaluators.
 - Add regression reports.
-- Add document ingestion.
-- Add embeddings and vector retrieval.
-- Add citations and retrieval debugging.
+- Add document ingestion into private Supabase Storage buckets.
+- Add embeddings and pgvector retrieval, including hybrid keyword/vector search and citations.
+- Add retrieval debugging.
 - Add evaluation datasets for groundedness and injection resistance.
 
 Deliverable: users can measure agent quality and build grounded knowledge workflows.
 
 ## Phase 7: Automation and advanced features
 
-- Add durable background execution.
-- Add scheduling and webhook triggers.
+- Add durable background execution on Supabase Queues.
+- Add scheduling with `pg_cron` and signed webhook triggers with `pg_net`.
 - Add notifications.
 - Add memory management.
 - Add advanced analytics.
@@ -2527,11 +2735,11 @@ Deliverable: a broader automation platform built on established foundations.
 - Run full test suites.
 - Fix security and reliability defects.
 - Verify clean setup from documentation.
-- Verify database migration and backup procedures.
+- Verify database migration, point-in-time recovery, and restore procedures.
 - Check frontend responsiveness and accessibility.
 - Remove unused code and debug artifacts.
 - Verify all displayed metrics.
-- Prepare deployment configuration.
+- Prepare deployment configuration, including Supabase environments and key rotation.
 - Document known limitations.
 - Produce a release checklist.
 
@@ -2597,6 +2805,8 @@ The first complete release must demonstrate all of the following:
 - Avoid holding database transactions open during lengthy model calls.
 - Keep model calls outside long-lived database transactions.
 - Cache only where correctness and authorization remain clear.
+- Size the database pool for the Supabase transaction pooler and keep the pool comfortably below the platform limit.
+- Index vector columns with HNSW and validate hybrid-search plans against real query patterns.
 
 ## Accessibility
 
@@ -2617,10 +2827,12 @@ The first complete release must demonstrate all of the following:
 - Avoid exposing secrets or infrastructure details through public health endpoints.
 - Use structured logs with request and run IDs.
 - Monitor failed jobs and stuck executions.
-- Document migrations and recovery procedures.
+- Document migrations and recovery procedures, including Supabase point-in-time recovery and restore drills.
 - Establish data retention and backup policies.
 - Ensure graceful shutdown of workers.
 - Record dependency versions and application release information.
+- Track Supabase project usage (database size, storage, egress, function and realtime limits) and plan for quota changes rather than discovering them as outages.
+- Use Supabase Logs and log drains for platform-level visibility, while keeping secrets out of every log sink.
 
 ---
 
@@ -2633,6 +2845,11 @@ Do not:
 - Add buttons that do nothing.
 - Store all application state in browser memory.
 - Store API keys in frontend code.
+- Expose the Supabase secret key to the browser, ship it in a bundle, or commit it.
+- Trust an access token, role or identity without verifying its signature server-side.
+- Expose domain tables through the Data API or query them directly from the browser.
+- Authorize a request with a policy that checks only the role and not the ownership or membership predicate.
+- Run two migration systems against the same database.
 - Execute arbitrary model-generated code.
 - Trust the model to enforce permissions.
 - Treat approval as a simple boolean detached from the exact action.
