@@ -1,17 +1,19 @@
-"""Schemas for identity, workspaces and memberships."""
+"""Schemas for identity, authentication, workspaces and memberships."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.config import AuthMode
 from app.core.permissions import Role
 
 
 class UserRegisterRequest(BaseModel):
-    """Registration payload."""
+    """Development registration payload (``AUTH_MODE=local`` only)."""
 
     email: EmailStr
     password: str = Field(min_length=10, max_length=256)
@@ -27,14 +29,14 @@ class UserRegisterRequest(BaseModel):
 
 
 class UserLoginRequest(BaseModel):
-    """Login payload."""
+    """Development login payload (``AUTH_MODE=local`` only)."""
 
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
 
 
 class UserRead(BaseModel):
-    """Public user representation."""
+    """Public profile representation (the identity is Supabase's ``auth.users`` id)."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -110,11 +112,19 @@ class MemberRoleUpdateRequest(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    """Result of a successful register/login."""
+    """Result of a successful sign-in.
 
+    ``access_token`` is a bearer token the client presents as
+    ``Authorization: Bearer <token>``. In Supabase mode the client normally
+    obtains it directly from Supabase Auth; this shape is also used by the
+    development issuer so the SPA has a single session model.
+    """
+
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"  # noqa: S105 - OAuth token type, not a secret
+    expires_at: datetime
     user: UserRead
     workspaces: list[WorkspaceRead] = Field(default_factory=list)
-    expires_at: datetime
 
 
 class MeResponse(BaseModel):
@@ -124,15 +134,19 @@ class MeResponse(BaseModel):
     workspaces: list[WorkspaceRead] = Field(default_factory=list)
 
 
-class CsrfTokenResponse(BaseModel):
-    """CSRF token for state-changing requests."""
+class AuthModeResponse(BaseModel):
+    """How the browser should obtain an access token."""
 
-    csrf_token: str
+    auth_mode: AuthMode
+    local_sign_in_enabled: bool = Field(
+        description="True only for the development issuer; never in a deployment."
+    )
+    supabase_url: str | None = None
 
 
 __all__ = [
+    "AuthModeResponse",
     "AuthResponse",
-    "CsrfTokenResponse",
     "MeResponse",
     "MemberInviteRequest",
     "MemberRead",

@@ -76,12 +76,12 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=422, content=payload)
 
     @app.exception_handler(StarletteHTTPException)
-    async def handle_http_exception(
-        request: Request, exc: StarletteHTTPException
-    ) -> JSONResponse:
+    async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = _HTTP_STATUS_TO_CODE.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
         payload = AppError(
-            str(exc.detail) if exc.detail else code.default_message
+            str(exc.detail)
+            if exc.detail
+            else code.default_message
             if hasattr(code, "default_message")
             else "The request could not be completed.",
             code=code,

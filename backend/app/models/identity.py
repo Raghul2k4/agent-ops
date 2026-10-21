@@ -1,7 +1,13 @@
 """Identity, workspace and audit models.
 
-Every workspace-owned table carries ``workspace_id`` and enforces tenant scope
-through foreign keys and composite unique constraints (`AGENTS.md` §21, §24).
+These ORM classes map onto the tables created by the Supabase SQL migrations in
+``supabase/migrations`` - the schema authority. The ORM never creates or alters
+schema at runtime (``AGENTS.md`` sections 4A.4 and 24).
+
+``app.profiles`` mirrors ``auth.users``: the primary key *is* the Supabase Auth
+subject, so a deleted identity cascades to its profile. Password credentials do
+not live here; ``app.local_credentials`` holds development-only hashes and is
+never written when ``AUTH_MODE=supabase``.
 """
 
 from __future__ import annotations
@@ -11,7 +17,6 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -19,117 +24,106 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.permissions import Role
 from app.db.base import Base, JSONPayload, TimestampMixin, UUIDPrimaryKeyMixin
 
-USER_STATUSES = ("active", "disabled", "pending")
+PROFILE_STATUSES = ("active", "disabled", "pending")
 MEMBER_STATUSES = ("active", "invited", "suspended")
 AUDIT_OUTCOMES = ("success", "denied", "failure")
 
 
-class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A platform user (local identity provider)."""
+class Profile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Application profile for an identity owned by Supabase Auth."""
 
-    __tablename__ = "users"
+    __tablename__ = "profiles"
     __table_args__ = (
-        CheckConstraint(
-            f"status IN {USER_STATUSES}",
-            name="user_status_valid",
-        ),
-        Index("ix_users_email", "email", unique=True),
+        CheckConstraint(f"status IN {PROFILE_STATUSES}", name="profiles_status_valid"),
+        # `uq_profiles_email_lower` (case-insensitive unique) and the
+        # `auth.users(id)` foreign key are created by the SQL migration.
     )
 
     email: Mapped[str] = mapped_column(String(320), nullable=False)
-    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
-    identity_provider_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
-    memberships: Mapped[list["WorkspaceMember"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
+    memberships: Mapped[list[WorkspaceMember]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        # `workspace_members` has two foreign keys to `profiles` (the member and
+        # the inviter); the relationship must name the membership column.
+        foreign_keys="WorkspaceMember.user_id",
     )
+
+
+class LocalCredential(TimestampMixin, Base):
+    """Development-only password credential.
+
+    Only written when ``AUTH_MODE=local``. Supabase Auth owns credentials in
+    every deployed environment, and the migration grants no policy at all on
+    this table so the authenticated role can never reach it.
+    """
+
+    __tablename__ = "local_credentials"
+
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A tenant boundary. All domain data is scoped to a workspace."""
 
     __tablename__ = "workspaces"
-    __table_args__ = (Index("ix_workspaces_slug", "slug", unique=True),)
 
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     slug: Mapped[str] = mapped_column(String(80), nullable=False)
     owner_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
     )
     settings: Mapped[dict[str, Any]] = mapped_column(
         JSONPayload, nullable=False, default=dict, server_default="{}"
     )
 
-    members: Mapped[list["WorkspaceMember"]] = relationship(
+    members: Mapped[list[WorkspaceMember]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
 
 class WorkspaceMember(UUIDPrimaryKeyMixin, Base):
-    """Membership of a user in a workspace with a role and status."""
+    """Membership of a profile in a workspace with a role and status."""
 
     __tablename__ = "workspace_members"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_members_workspace_id_user_id"),
+        UniqueConstraint(
+            "workspace_id", "user_id", name="uq_workspace_members_workspace_id_user_id"
+        ),
         CheckConstraint(f"role IN {tuple(r.value for r in Role)}", name="member_role_valid"),
         CheckConstraint(f"status IN {MEMBER_STATUSES}", name="member_status_valid"),
-        Index("ix_workspace_members_user_id", "user_id"),
     )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     invited_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=None, nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="members")
-    user: Mapped[User] = relationship(back_populates="memberships")
-
-
-class AuthSession(UUIDPrimaryKeyMixin, Base):
-    """Server-side session.
-
-    Only a SHA-256 hash of the session token is stored, so a database leak
-    cannot be replayed as a valid session.
-    """
-
-    __tablename__ = "sessions"
-    __table_args__ = (
-        Index("ix_sessions_user_id", "user_id"),
-        Index("ix_sessions_expires_at", "expires_at"),
-    )
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=None, nullable=False
-    )
+    profile: Mapped[Profile] = relationship(back_populates="memberships", foreign_keys=[user_id])
 
 
 class ApiKey(UUIDPrimaryKeyMixin, Base):
@@ -141,7 +135,9 @@ class ApiKey(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "api_keys"
     __table_args__ = (
         Index("ix_api_keys_workspace_id", "workspace_id"),
-        CheckConstraint("revoked_at IS NULL OR revoked_at >= created_at", name="api_key_revoked_ok"),
+        CheckConstraint(
+            "revoked_at IS NULL OR revoked_at >= created_at", name="api_key_revoked_ok"
+        ),
     )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -155,10 +151,10 @@ class ApiKey(UUIDPrimaryKeyMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=None, nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
@@ -176,7 +172,7 @@ class AuditEvent(UUIDPrimaryKeyMixin, Base):
         ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True
     )
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
     )
     action: Mapped[str] = mapped_column(String(128), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -186,7 +182,7 @@ class AuditEvent(UUIDPrimaryKeyMixin, Base):
         JSONPayload, nullable=False, default=dict, server_default="{}"
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=None, nullable=False
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
@@ -204,7 +200,7 @@ class WorkspacePreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
     )
     preferences: Mapped[dict[str, Any]] = mapped_column(
         JSONPayload, nullable=False, default=dict, server_default="{}"
@@ -214,8 +210,8 @@ class WorkspacePreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 __all__ = [
     "ApiKey",
     "AuditEvent",
-    "AuthSession",
-    "User",
+    "LocalCredential",
+    "Profile",
     "Workspace",
     "WorkspaceMember",
     "WorkspacePreference",

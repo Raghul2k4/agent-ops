@@ -36,3 +36,9 @@ Thumbs.db
 *.db
 storage/
 uploads/
+var/
+.devdb/
+
+# Supabase CLI local state (never schema or configuration)
+supabase/.temp/
+supabase/.branches/

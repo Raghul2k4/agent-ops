@@ -1,0 +1,11 @@
+-- Reference seed applied by `supabase db reset`.
+--
+-- Intentionally empty for M1. Identity comes from Supabase Auth and every
+-- domain row belongs to a workspace that a real user created. Synthetic demo
+-- data (CRM records, agents, workflows, evaluation suites) is provisioned by
+-- the application's explicit demo command instead, so it is always labelled as
+-- demonstration data and never mixed into a real workspace
+-- (AGENTS.md sections 29 and 30).
+--
+-- When reference data becomes necessary (for example global tool definitions),
+-- insert it here with deterministic identifiers and `on conflict do nothing`.

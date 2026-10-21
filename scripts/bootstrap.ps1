@@ -64,17 +64,48 @@ if (-not $SkipFrontend) {
 
 if (-not $SkipMigrations) {
     Write-Step 'Database migrations'
-    Push-Location $backend
-    try {
-        & $py -m alembic upgrade head
-        if ($LASTEXITCODE -eq 0) { Write-Host 'Migrations applied.' -ForegroundColor Green }
-        else { Write-Host 'Migrations did not run - check DATABASE_URL (see docs/deployment.md section 2).' -ForegroundColor Yellow }
-    } finally { Pop-Location }
+    # The SQL files in supabase/migrations are the single schema authority (no Alembic).
+    # Hosted Supabase: prefer `supabase db push` (see docs/deployment.md 2.3).
+    # Here we apply them with psql so a local PostgreSQL test database stays in sync.
+    $migrations = Get-ChildItem (Join-Path $root 'supabase\migrations') -Filter '*.sql' |
+        Sort-Object Name
+    $envFile = Join-Path $backend '.env'
+    $dbUrl = if (Test-Path $envFile) {
+        (Select-String -Path $envFile -Pattern '^\s*DATABASE_URL\s*=' |
+            Select-Object -First 1).Line -replace '^\s*DATABASE_URL\s*=\s*', ''
+    } else { '' }
+
+    if ([string]::IsNullOrWhiteSpace($dbUrl) -or $dbUrl -match '<[^>]+>') {
+        Write-Host 'DATABASE_URL is not configured - skipping migrations.' -ForegroundColor Yellow
+        Write-Host 'Set it in backend/.env, or run: supabase db push --db-url ...' -ForegroundColor Yellow
+    } elseif ($migrations.Count -eq 0) {
+        Write-Host 'No migration files found - skipping.' -ForegroundColor Yellow
+    } else {
+        $psql = (Get-Command psql -ErrorAction SilentlyContinue).Source
+        if (-not $psql) {
+            $candidate = Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin\psql.exe' -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending | Select-Object -First 1
+            if ($candidate) { $psql = $candidate.FullName }
+        }
+        if (-not $psql) {
+            Write-Host 'psql not found - skipping migrations. Install the PostgreSQL client or set PSQL_BIN.' -ForegroundColor Yellow
+        } else {
+            $dsn = $dbUrl.Trim().Trim('"').Trim("'") -replace '^postgresql\+[a-z0-9]+://', 'postgresql://'
+            foreach ($migration in $migrations) {
+                & $psql $dsn '-v' 'ON_ERROR_STOP=1' '-f' $migration.FullName | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Migration failed: $($migration.Name)" -ForegroundColor Red
+                    break
+                }
+            }
+            if ($LASTEXITCODE -eq 0) { Write-Host 'Migrations applied.' -ForegroundColor Green }
+        }
+    }
 }
 
 Write-Step 'Done'
 Write-Host 'Next steps:' -ForegroundColor White
-Write-Host '  1. Review backend/.env (DATABASE_URL, SESSION_SECRET)'
-Write-Host '  2. cd backend; .\.venv\Scripts\Activate.ps1; uvicorn app.main:app --reload'
+Write-Host '  1. Review backend/.env (DATABASE_URL, AUTH_MODE, SUPABASE_URL)'
+Write-Host '  2. cd backend; .\.venv\Scripts\Activate.ps1; python -m app'
 Write-Host '  3. cd apps/web; npm run dev'
 Write-Host '  4. cd backend; python -m pytest -q'

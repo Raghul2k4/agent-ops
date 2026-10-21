@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
 import { Button } from '@/components/ui/button'
@@ -17,7 +17,7 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>
 
 export function LoginPage() {
-  const { signIn } = useSession()
+  const { signIn, isAuthenticated, configurationError } = useSession()
   const navigate = useNavigate()
   const {
     register,
@@ -26,12 +26,20 @@ export function LoginPage() {
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({ resolver: zodResolver(schema), defaultValues: { email: '', password: '' } })
 
+  if (isAuthenticated) {
+    return <Navigate to="/" replace />
+  }
+
   async function onSubmit(values: FormValues) {
     try {
       await signIn(values.email, values.password)
       navigate('/')
     } catch (error) {
       if (error instanceof ApiError) {
+        setError('root', { message: error.message })
+        return
+      }
+      if (error instanceof Error && error.message) {
         setError('root', { message: error.message })
         return
       }
@@ -44,6 +52,15 @@ export function LoginPage() {
       title="Sign in to AgentOps"
       subtitle="Build, run and govern AI agents with observable, controllable execution."
     >
+      {configurationError ? (
+        <div
+          className="mb-4 rounded-md border border-[var(--warning)]/30 bg-[var(--warning-muted)] px-3 py-2 text-xs text-[var(--warning)]"
+          role="alert"
+        >
+          {configurationError}
+        </div>
+      ) : null}
+
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
         {errors.root?.message ? (
           <div
@@ -83,7 +100,7 @@ export function LoginPage() {
           <FieldError>{errors.password?.message}</FieldError>
         </div>
 
-        <Button type="submit" className="w-full" loading={isSubmitting}>
+        <Button type="submit" className="w-full" loading={isSubmitting} disabled={Boolean(configurationError)}>
           Sign in
         </Button>
 
@@ -120,7 +137,8 @@ export function AuthLayout({
         <p className="mt-1 mb-6 text-xs text-[var(--muted-foreground)]">{subtitle}</p>
         <div className="surface-card p-5">{children}</div>
         <FieldHint>
-          Sessions are server-side and secured with an HttpOnly cookie plus a CSRF token.
+          Identity is managed by Supabase Auth. The API verifies every access token
+          cryptographically and never trusts a client-supplied user id.
         </FieldHint>
       </div>
     </div>

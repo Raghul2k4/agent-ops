@@ -7,7 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import AuthContext, get_auth_context, get_db
-from app.core.config import settings
+from app.api.v1.serializers import workspace_read
+from app.core.config import LOCAL_AUTH_ENVIRONMENTS, settings
 from app.core.errors import PermissionDenied
 from app.core.logging import get_logger
 from app.schemas.common import HealthStatus, ReadinessStatus
@@ -43,6 +44,13 @@ async def ready(session: AsyncSession = Depends(get_db)) -> ReadinessStatus:
         logger.warning("readiness.database_failed", error=str(exc))
         checks["database"] = "unavailable"
 
+    # The auth dependency must be able to verify tokens: a Supabase project
+    # with a reachable JWKS endpoint, or the development issuer.
+    if settings.auth_mode == "supabase":
+        checks["auth"] = "ok" if settings.jwks_url else "unavailable"
+    else:
+        checks["auth"] = "ok" if settings.environment in LOCAL_AUTH_ENVIRONMENTS else "unavailable"
+
     status = "ready" if all(value == "ok" for value in checks.values()) else "degraded"
     return ReadinessStatus(status=status, checks=checks)
 
@@ -52,37 +60,18 @@ async def me(
     context: AuthContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> MeResponse:
-    """Return the authenticated user and the workspaces they belong to."""
-    user = context.user
-    if user is None:
+    """Return the authenticated profile and the workspaces it belongs to."""
+    profile = context.profile
+    if profile is None:
         raise PermissionDenied(
-            "This endpoint requires an interactive session; API keys are not supported here."
+            "This endpoint requires a user identity; API keys are not supported here."
         )
 
-    memberships = await workspace_service.list_workspaces_for_user(session, user=user)
+    memberships = await workspace_service.list_workspaces_for_user(session, profile=profile)
     counts = await workspace_service.member_counts(session, [ws.id for ws, _ in memberships])
     return MeResponse(
-        user=UserRead.model_validate(user),
-        workspaces=[
-            _workspace_read(ws, role, counts.get(ws.id))
-            for ws, role in memberships
-        ],
-    )
-
-
-def _workspace_read(workspace, role, member_count):  # type: ignore[no-untyped-def]
-    from app.schemas.identity import WorkspaceRead
-
-    return WorkspaceRead(
-        id=workspace.id,
-        name=workspace.name,
-        slug=workspace.slug,
-        owner_id=workspace.owner_id,
-        role=role,
-        member_count=member_count,
-        settings=workspace.settings or {},
-        created_at=workspace.created_at,
-        updated_at=workspace.updated_at,
+        user=UserRead.model_validate(profile),
+        workspaces=[workspace_read(ws, role, counts.get(ws.id)) for ws, role in memberships],
     )
 
 

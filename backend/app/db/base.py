@@ -9,7 +9,7 @@ from sqlalchemy import DateTime, MetaData, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-# A stable naming convention keeps Alembic autogenerate diffs small and reviewable.
+# A stable naming convention keeps ORM metadata and the SQL migrations aligned.
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -24,9 +24,13 @@ JSONPayload = JSONB()
 
 
 class Base(DeclarativeBase):
-    """Declarative base for all ORM models."""
+    """Declarative base for all ORM models.
 
-    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    Every domain table lives in the non-exposed ``app`` schema (AGENTS.md 4A.4),
+    so the schema is declared once on the metadata instead of on each model.
+    """
+
+    metadata = MetaData(schema="app", naming_convention=NAMING_CONVENTION)
 
 
 class UUIDPrimaryKeyMixin:
@@ -49,4 +53,4 @@ class TimestampMixin:
     )
 
 
-__all__ = ["Base", "JSONPayload", "NAMING_CONVENTION", "TimestampMixin", "UUIDPrimaryKeyMixin"]
+__all__ = ["NAMING_CONVENTION", "Base", "JSONPayload", "TimestampMixin", "UUIDPrimaryKeyMixin"]

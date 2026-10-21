@@ -6,10 +6,10 @@ matrix to decide what to render.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     """Workspace roles, ordered from most to least privileged."""
 
     OWNER = "owner"
@@ -20,7 +20,7 @@ class Role(str, Enum):
     VIEWER = "viewer"
 
 
-class Permission(str, Enum):
+class Permission(StrEnum):
     """Fine-grained capabilities."""
 
     WORKSPACE_READ = "workspace.read"
@@ -158,8 +158,8 @@ BASELINE_PERMISSIONS: frozenset[Permission] = frozenset(
 
 __all__ = [
     "BASELINE_PERMISSIONS",
-    "Permission",
     "ROLE_PERMISSIONS",
+    "Permission",
     "Role",
     "permissions_for_role",
     "role_has_permission",

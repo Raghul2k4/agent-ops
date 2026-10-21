@@ -1,16 +1,19 @@
 /**
  * Typed API client.
  *
- * Every mutating request automatically carries the double-submit CSRF token
- * that the backend issued in the `agentops_csrf` cookie. Failures are
- * normalised into {@link ApiError} so the UI can branch on a stable error code
- * instead of parsing messages.
+ * Every request carries the current access token as `Authorization: Bearer`.
+ * The token comes from an injected provider so the client never imports the
+ * auth layer: the session provider installs it once the gateway is known.
+ *
+ * No cookie is sent or read - the API authenticates bearer tokens only - so the
+ * old double-submit CSRF machinery is gone.
+ *
+ * Failures are normalised into {@link ApiError} so the UI can branch on a stable
+ * error code instead of parsing messages.
  */
 
 export const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api/v1'
-
-export const CSRF_COOKIE_NAME = 'agentops_csrf'
 
 export interface ApiErrorBody {
   code: string
@@ -50,24 +53,28 @@ export class ApiError extends Error {
   }
 }
 
-function readCookie(name: string): string | null {
-  if (typeof document === 'undefined') return null
-  const match = document.cookie
-    .split('; ')
-    .find((entry) => entry.startsWith(`${name}=`))
-  return match ? decodeURIComponent(match.slice(name.length + 1)) : null
+type AccessTokenProvider = () => Promise<string | null>
+
+let accessTokenProvider: AccessTokenProvider | null = null
+
+/**
+ * Install the function the client uses to read the current access token.
+ *
+ * Called by the session provider once the auth gateway has been resolved; tests
+ * call it directly.
+ */
+export function setAccessTokenProvider(provider: AccessTokenProvider | null): void {
+  accessTokenProvider = provider
 }
 
-interface RequestOptions extends Omit<RequestInit, 'body'> {
+export interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown
   /** Send a JSON body (default) or a raw body (e.g. FormData). */
   raw?: boolean
-  /** Skip the CSRF header (used by the initial unauthenticated calls). */
-  skipCsrf?: boolean
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { body, raw, skipCsrf, headers, ...rest } = options
+  const { body, raw, headers, ...rest } = options
   const method = (rest.method ?? 'GET').toUpperCase()
   const requestHeaders = new Headers(headers)
 
@@ -81,17 +88,15 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     }
   }
 
-  if (!skipCsrf && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    const csrf = readCookie(CSRF_COOKIE_NAME)
-    if (csrf) requestHeaders.set('X-CSRF-Token', csrf)
-  }
+  const token = accessTokenProvider ? await accessTokenProvider() : null
+  if (token) requestHeaders.set('Authorization', `Bearer ${token}`)
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...rest,
     method,
     headers: requestHeaders,
     body: payload,
-    credentials: 'include',
+    credentials: 'omit',
   })
 
   if (response.status === 204) {
@@ -134,7 +139,7 @@ export const api = {
  * Fetch a server-root endpoint (health / readiness live outside `/api/v1`).
  */
 export async function rootGet<T>(path: string): Promise<T> {
-  const response = await fetch(path, { credentials: 'include' })
+  const response = await fetch(path, { credentials: 'omit' })
   const contentType = response.headers.get('content-type') ?? ''
   const data: unknown = contentType.includes('application/json')
     ? await response.json()

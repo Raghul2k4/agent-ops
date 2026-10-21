@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Generic, TypeVar
-
 from pydantic import BaseModel, ConfigDict, Field
-
-T = TypeVar("T")
 
 
 class ErrorBody(BaseModel):
@@ -25,7 +21,7 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
-class Page(BaseModel, Generic[T]):
+class Page[T](BaseModel):
     """Cursor-paginated collection."""
 
     model_config = ConfigDict(populate_by_name=True)

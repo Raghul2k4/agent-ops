@@ -1,0 +1,71 @@
+# Supabase local development stack for AgentOps.
+#
+# `supabase start` runs Postgres, Auth, Storage, Realtime and Studio in Docker
+# on the ports below. The hosted project uses the same migrations; only the
+# connection details and keys differ (see docs/supabase.md).
+#
+# The Data API (PostgREST) is deliberately not part of the AgentOps runtime:
+# FastAPI is the only domain API and the `app` schema is never exposed. The
+# `public` schema is left in the default exposed list for Supabase tooling
+# compatibility but holds no domain tables.
+
+project_id = "agentops"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+port = 54329
+pool_mode = "transaction"
+default_pool_size = 20
+max_client_conn = 100
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[realtime]
+enabled = true
+
+[studio]
+enabled = true
+port = 54323
+api_url = "http://127.0.0.1"
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "25MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173"]
+jwt_expiry = 3600
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = false
+
+[auth.sms]
+enable_signup = false
+enable_confirmations = false
+
+[analytics]
+enabled = false

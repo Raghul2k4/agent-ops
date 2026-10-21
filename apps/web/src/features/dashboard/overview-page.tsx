@@ -159,8 +159,8 @@ export function OverviewPage() {
           <CardContent>
             <ul className="space-y-2 text-sm">
               {[
-                'Account registration, sign-in and sign-out with server-side sessions',
-                'Double-submit CSRF protection on every mutating request',
+                'Supabase Auth sign-in and sign-out with verified bearer tokens',
+                'Cryptographic token verification against the project JWKS',
                 'Workspace creation, membership and role management',
                 'Tenant isolation: non-members receive "not found", never data',
                 'Append-only audit trail for authentication and workspace events',

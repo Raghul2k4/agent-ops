@@ -11,11 +11,11 @@ Every failure that reaches the API boundary is expressed as an `AppError` carryi
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class ErrorCode(str, Enum):
+class ErrorCode(StrEnum):
     """Canonical error codes."""
 
     VALIDATION_ERROR = "VALIDATION_ERROR"
@@ -41,7 +41,7 @@ class ErrorCode(str, Enum):
 class ErrorSpec:
     """Static behaviour of an error code."""
 
-    __slots__ = ("status_code", "retryable", "terminal", "alert")
+    __slots__ = ("alert", "retryable", "status_code", "terminal")
 
     def __init__(
         self,
@@ -161,10 +161,10 @@ class InternalError(AppError):
 
 
 __all__ = [
+    "ERROR_SPECS",
     "AppError",
     "AuthenticationRequired",
     "ConflictError",
-    "ERROR_SPECS",
     "ErrorCode",
     "ErrorSpec",
     "InternalError",

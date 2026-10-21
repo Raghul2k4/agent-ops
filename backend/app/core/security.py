@@ -1,4 +1,10 @@
-"""Password hashing, token generation, canonical hashing and cookie helpers."""
+"""Password hashing, token generation, canonical hashing and API-key helpers.
+
+Session cookies and CSRF tokens are gone: the browser authenticates with a
+Supabase access token (or, in development, a locally issued JWT) presented as
+``Authorization: Bearer``. A bearer token cannot be attached by a cross-site
+form submission, so cookie CSRF defences are neither required nor implemented.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +19,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 
 from app.core.config import settings
 
-SESSION_COOKIE_NAME = "agentops_session"
-CSRF_COOKIE_NAME = "agentops_csrf"
-CSRF_HEADER_NAME = "X-CSRF-Token"
+API_KEY_PREFIX = "agoa"
 
 _password_hasher = PasswordHasher(
     time_cost=settings.argon2_time_cost,
@@ -25,7 +29,7 @@ _password_hasher = PasswordHasher(
 
 
 # --------------------------------------------------------------------------- #
-# Passwords
+# Passwords (development-only local credentials)
 # --------------------------------------------------------------------------- #
 def hash_password(password: str) -> str:
     """Hash a plaintext password with argon2id."""
@@ -63,7 +67,7 @@ def password_problems(password: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Tokens
+# Opaque tokens and API keys
 # --------------------------------------------------------------------------- #
 def generate_token(nbytes: int = 32) -> str:
     """Generate a URL-safe random token."""
@@ -71,7 +75,7 @@ def generate_token(nbytes: int = 32) -> str:
 
 
 def hash_token(token: str) -> str:
-    """Hash a bearer/session token for storage (plaintext is never persisted)."""
+    """Hash a bearer/API token for storage (plaintext is never persisted)."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -85,9 +89,13 @@ def generate_api_key() -> tuple[str, str]:
 
     The plaintext is shown to the operator exactly once; only its hash is stored.
     """
-    prefix = "agoa"
     body = secrets.token_urlsafe(32)
-    return f"{prefix}_{body}", prefix
+    return f"{API_KEY_PREFIX}_{body}", API_KEY_PREFIX
+
+
+def is_api_key(token: str) -> bool:
+    """Whether a bearer token is an AgentOps API key rather than a JWT."""
+    return token.startswith(f"{API_KEY_PREFIX}_")
 
 
 # --------------------------------------------------------------------------- #
@@ -99,7 +107,13 @@ def canonical_json(payload: Any) -> str:
     Keys are sorted, whitespace is removed and non-ASCII characters are
     preserved, so two semantically identical payloads always hash the same.
     """
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def hash_payload(payload: Any) -> str:
@@ -108,15 +122,14 @@ def hash_payload(payload: Any) -> str:
 
 
 __all__ = [
-    "CSRF_COOKIE_NAME",
-    "CSRF_HEADER_NAME",
-    "SESSION_COOKIE_NAME",
+    "API_KEY_PREFIX",
     "canonical_json",
     "generate_api_key",
     "generate_token",
     "hash_password",
     "hash_payload",
     "hash_token",
+    "is_api_key",
     "password_problems",
     "tokens_match",
     "verify_password",

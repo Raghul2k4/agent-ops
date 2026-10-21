@@ -1,3 +1,13 @@
+# Local, self-contained stack (unverified: Docker is not installed on the
+# development machine). This runs the development identity issuer, NOT Supabase
+# Auth. For the real identity path use the hosted project or `supabase start`
+# (see docs/deployment.md).
+#
+#   $env:LOCAL_JWT_SECRET = "<random value>"
+#   docker compose up --build
+#
+#   API   http://localhost:8000
+#   Web   http://localhost:5173
 services:
   postgres:
     image: postgres:18-alpine
@@ -15,47 +25,39 @@ services:
       timeout: 5s
       retries: 20
 
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   backend:
     build:
-      context: ../backend
+      context: ./backend
       dockerfile: ../infra/docker/backend.Dockerfile
     environment:
       ENVIRONMENT: development
+      AUTH_MODE: local
       DATABASE_URL: postgresql+psycopg://agentops:${POSTGRES_PASSWORD:-agentops}@postgres:5432/agentops
-      REDIS_URL: redis://redis:6379/0
+      TEST_DATABASE_URL: postgresql+psycopg://agentops:${POSTGRES_PASSWORD:-agentops}@postgres:5432/agentops
+      # libpq DSN for psql (it does not understand the SQLAlchemy "+psycopg" suffix).
+      MIGRATION_DATABASE_URL: postgresql://agentops:${POSTGRES_PASSWORD:-agentops}@postgres:5432/agentops
+      LOCAL_JWT_SECRET: ${LOCAL_JWT_SECRET:?set LOCAL_JWT_SECRET (development only)}
       CORS_ORIGINS: http://localhost:5173
-      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       LOG_LEVEL: INFO
     ports:
       - "8000:8000"
+    volumes:
+      # Schema authority, mounted read-only so the command applies the same SQL
+      # files used in development, tests and hosted deployments.
+      - ./supabase/migrations:/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      sh -c "for f in /migrations/*.sql; do psql \"$$MIGRATION_DATABASE_URL\" -v ON_ERROR_STOP=1 -f \"$$f\"; done &&
+             python -m app"
 
   web:
     build:
-      context: ..
+      context: .
       dockerfile: infra/docker/web.Dockerfile
-    environment:
-      VITE_API_BASE_URL: http://localhost:8000/api/v1
     ports:
-      - "5173:5173"
+      - "5173:80"
     depends_on:
       - backend
 

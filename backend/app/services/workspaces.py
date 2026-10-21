@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, ResourceNotFound, ValidationError
 from app.core.permissions import Role
-from app.models.identity import User, Workspace, WorkspaceMember
+from app.models.identity import Profile, Workspace, WorkspaceMember
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -40,7 +40,7 @@ async def _unique_slug(session: AsyncSession, name: str) -> str:
 
 
 async def create_workspace(
-    session: AsyncSession, *, owner: User, name: str
+    session: AsyncSession, *, owner: Profile, name: str
 ) -> tuple[Workspace, WorkspaceMember]:
     """Create a workspace and register the creator as owner."""
     slug = await _unique_slug(session, name)
@@ -60,15 +60,15 @@ async def create_workspace(
 
 
 async def list_workspaces_for_user(
-    session: AsyncSession, *, user: User
+    session: AsyncSession, *, profile: Profile
 ) -> list[tuple[Workspace, Role]]:
-    """Return every workspace the user is an active member of."""
+    """Return every workspace the profile is an active member of."""
     rows = (
         await session.execute(
             select(Workspace, WorkspaceMember)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
             .where(
-                WorkspaceMember.user_id == user.id,
+                WorkspaceMember.user_id == profile.id,
                 WorkspaceMember.status == "active",
             )
             .order_by(Workspace.created_at.asc())
@@ -78,16 +78,16 @@ async def list_workspaces_for_user(
 
 
 async def get_workspace_for_member(
-    session: AsyncSession, *, workspace_id: uuid.UUID, user: User
+    session: AsyncSession, *, workspace_id: uuid.UUID, profile: Profile
 ) -> tuple[Workspace, Role]:
-    """Load a workspace the user is a member of, or raise ``RESOURCE_NOT_FOUND``."""
+    """Load a workspace the profile is a member of, or raise ``RESOURCE_NOT_FOUND``."""
     row = (
         await session.execute(
             select(Workspace, WorkspaceMember)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
             .where(
                 Workspace.id == workspace_id,
-                WorkspaceMember.user_id == user.id,
+                WorkspaceMember.user_id == profile.id,
                 WorkspaceMember.status == "active",
             )
         )
@@ -98,7 +98,9 @@ async def get_workspace_for_member(
     return workspace, Role(membership.role)
 
 
-async def member_counts(session: AsyncSession, workspace_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+async def member_counts(
+    session: AsyncSession, workspace_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
     """Return active member counts keyed by workspace id."""
     if not workspace_ids:
         return {}
@@ -112,20 +114,22 @@ async def member_counts(session: AsyncSession, workspace_ids: list[uuid.UUID]) -
             .group_by(WorkspaceMember.workspace_id)
         )
     ).all()
-    return {workspace_id: count for workspace_id, count in rows}
+    return dict(rows)
 
 
-async def list_members(session: AsyncSession, *, workspace_id: uuid.UUID) -> list[tuple[WorkspaceMember, User]]:
-    """List workspace members with their user records."""
+async def list_members(
+    session: AsyncSession, *, workspace_id: uuid.UUID
+) -> list[tuple[WorkspaceMember, Profile]]:
+    """List workspace members with their profile records."""
     rows = (
         await session.execute(
-            select(WorkspaceMember, User)
-            .join(User, User.id == WorkspaceMember.user_id)
+            select(WorkspaceMember, Profile)
+            .join(Profile, Profile.id == WorkspaceMember.user_id)
             .where(WorkspaceMember.workspace_id == workspace_id)
             .order_by(WorkspaceMember.created_at.asc())
         )
     ).all()
-    return [(member, user) for member, user in rows]
+    return [(member, profile) for member, profile in rows]
 
 
 async def add_member(
@@ -138,14 +142,14 @@ async def add_member(
 ) -> WorkspaceMember:
     """Add an existing platform user to a workspace."""
     normalized = email.strip().lower()
-    user = await session.scalar(select(User).where(User.email == normalized))
-    if user is None:
+    profile = await session.scalar(select(Profile).where(func.lower(Profile.email) == normalized))
+    if profile is None:
         raise ResourceNotFound("No user exists with that email address.")
 
     existing = await session.scalar(
         select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == workspace.id,
-            WorkspaceMember.user_id == user.id,
+            WorkspaceMember.user_id == profile.id,
         )
     )
     if existing is not None:
@@ -153,7 +157,7 @@ async def add_member(
 
     membership = WorkspaceMember(
         workspace_id=workspace.id,
-        user_id=user.id,
+        user_id=profile.id,
         role=role.value,
         status="active",
         invited_by=invited_by,

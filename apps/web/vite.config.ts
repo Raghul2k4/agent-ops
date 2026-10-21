@@ -36,6 +36,10 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom', 'react-router-dom'],
           query: ['@tanstack/react-query'],
+          // Auth is only needed after boot; keeping it out of the main chunk
+          // also keeps the entry bundle under the size warning threshold.
+          supabase: ['@supabase/supabase-js'],
+          validation: ['zod', 'react-hook-form'],
         },
       },
     },

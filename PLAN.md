@@ -63,7 +63,7 @@ Level Security is applied as defence in depth beneath the API's own authorizatio
 | **Supabase CLI** | **Installed `2.121.0`** | `supabase --version` | Migrations, lint, link, local stack, deploy all CLI-driven |
 | **Docker** | **NOT INSTALLED** | `docker --version` → not recognized | `supabase start` (local stack) and `docker compose` **cannot run here**; a hosted Supabase project is required for local development until Docker exists |
 | **PostgreSQL** | **18 x64 installed & RUNNING**, `127.0.0.1:5432` | service `postgresql-x64-18` | Useful as a throwaway Postgres for applying the same SQL migrations in backend integration tests; **not** the system of record |
-| PG auth | `scram-sha-256` on local + host | `pg_hba.conf` | Password unknown → blocks local-PG migration runs (Plan §12 Q1) |
+| PG auth | `scram-sha-256` | `pg_hba.conf` | The system cluster's password is not needed: tests use the project-local cluster on `127.0.0.1:55432` (`.devdb/`, Plan §12 Q7) |
 | **pgvector** | **NOT INSTALLED** in the local PG18 | `share/extension/vector.control` absent | Resolved on the target platform: Supabase Postgres ships `vector` (Plan §3.3) |
 | Redis | Not installed | `Get-Service` | Replaced by Supabase Queues (`pgmq`) + `pg_cron` (Plan §2.3 D2/D3) |
 | Ollama | Not installed | `Get-Command ollama` | Local-model path code-complete but unrunnable here; simulation provider keeps the demo honest |
@@ -506,55 +506,60 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done & verified.
 **Exit:** repo initialised, plan committed, blockers identified with owners. **Reached.**
 **Verify:** `git status` clean; `scripts/verify_env.ps1` reports the environment.
 
-> **Delivery note (2026-10-21):** work was paused at the end of M0 by request. The M1 scaffold
-> below was started and is committed separately as *"M1 (work in progress): platform foundation
-> scaffold"*. It is **not** a completed milestone: the backend unit tier passes, but the
-> integration tier has not been run and the frontend has not been type-checked or built yet.
-> Treat it as a starting point, not as delivered work.
+> **Delivery note (2026-10-21):** M1 is **complete and verified** against the hosted Supabase
+> project. Evidence, including the exact checks and the administrative test bootstrap used because
+> email confirmation is enabled, is recorded in `docs/supabase.md` §8 and `docs/roadmap.md`.
 
 ---
 
-### M1 — Platform foundation (spec Phase 1) — *in progress, paused*
+### M1 — Platform foundation (spec Phase 1) — *complete, tested*
 
 Backend
 - [x] `backend/` package, `pyproject.toml` (ruff, mypy, pytest config), venv on 3.12
-- [x] `core/config.py` (pydantic-settings; env-prefixed; `.env` support)
-- [x] `db/session.py` (async engine, pool, `get_session` dependency), `db/base.py`
-- [x] Alembic scaffold + initial migration (to be **re-expressed as a Supabase SQL migration**)
+- [x] `core/config.py` — pydantic-settings; auth mode, Supabase/JWKS settings, DB timeouts;
+      refuses `AUTH_MODE=local` outside development/test
+- [x] `db/session.py` — async engine, pooler-safe connect args (`prepare_threshold=None`),
+      statement/idle timeouts, `application_name`; `db/base.py` pins `MetaData(schema="app")`
+- [x] **Alembic retired.** `supabase/migrations/20261021120000_initial_identity_schema.sql` is the
+      single schema authority: 7 tables, indexes, constraints, RLS, 20 policies, 3 `app_private`
+      helpers, revoked grants, and a local/CI auth shim
 - [x] `core/errors.py` — §27 taxonomy registry; uniform error envelope
-- [x] `core/security.py` — argon2id hashing, session tokens, CSRF, canonical payload hashing
-- [x] `core/permissions.py` — role→permission matrix
-- [x] `api/v1/deps.py` — identity resolution, RBAC dependencies, CSRF enforcement
-- [x] Auth routes: register/login/logout/me/csrf; workspace routes (CRUD + members)
-- [x] `GET /health` (liveness), `GET /ready` (DB readiness), `GET /api/v1/me`
+- [x] `core/security.py` — Argon2id for the development issuer, canonical payload hashing
+- [x] `core/permissions.py` — 6-role → permission matrix
+- [x] `auth/verify.py` — `LocalTokenVerifier` (HS256, dev/test) and `SupabaseTokenVerifier`
+      (JWKS, ES256/RS256/EdDSA, `iss`/`aud`/`exp`/`sub`, key rotation, negative paths tested)
+- [x] `api/v1/deps.py` — verified-claims resolution, profile provisioning, RBAC dependencies;
+      no session cookies and no CSRF machinery (bearer tokens only)
+- [x] Routes: `/health`, `/ready`, `/auth/mode`, `/auth/register|login|logout`, `/me`,
+      `/workspaces` CRUD, `/workspaces/{id}/members` CRUD
 - [x] Request-ID middleware, structlog JSON logging, CORS allowlist
-- [ ] **Supabase cut-over (not started):** create/link the project, write
-      `supabase/migrations/0001_initial.sql` (schema `app`, RLS, extensions), replace Alembic,
-      add JWKS token verification, map `auth.users.id` → `app.profiles`, retire the local session
-      table and CSRF machinery, add `SUPABASE_*` settings
-- [ ] **Not yet executed:** integration + security tiers (blocked on Plan §12 Q1)
+- [x] `python -m app` entry point + `app/loop.py` selector loop for Windows/psycopg
+- [x] **Executed:** 97 tests pass (unit + integration + RLS assertions); ruff, format, mypy clean
 
 Frontend
 - [x] Vite + React 19 + TS strict + Tailwind v4 + path aliases
-- [x] Design tokens + theme toggle; UI primitives
-- [x] App shell: sidebar (11 areas, unavailable modules explicitly marked), header, command palette
-- [x] Auth pages, workspace switcher, workspace create/detail with member role management
-- [x] TanStack Query provider, API client with typed error mapping and CSRF header
-- [ ] **Supabase cut-over (not started):** `@supabase/supabase-js` client, sign-in/sign-up through
-      Supabase Auth, session provider reads the Supabase session, API client sends the bearer token
-- [ ] **Not yet executed:** `npm run typecheck`, `npm run build`, unit tests
+- [x] Design tokens + theme toggle; UI primitives; app shell and command palette
+- [x] `@supabase/supabase-js` client, Supabase and local auth gateways, explicit configuration
+      error (no silent fallback), email-confirmation state
+- [x] Session provider reads the Supabase session; API client sends the bearer token with
+      `credentials: 'omit'`
+- [x] Login/register pages, workspace switcher, workspace create/detail with member roles
+- [x] **Executed:** 19 unit tests; lint 0 errors; typecheck; production build; bundle secret scan
 
 Infra & CI
-- [x] `docker-compose.yml`, `.env.example`, `scripts/bootstrap.ps1`, `scripts/verify_env.ps1`
-- [x] GitHub Actions `ci.yml`: ruff, mypy, pytest, web lint/typecheck/build, compose smoke
-- [ ] **Supabase CI (not started):** `supabase start` → `supabase db reset` → `supabase db lint`
-      → policy tests → backend integration tests
-- [ ] **Not yet executed:** a full green CI run
+- [x] `.env.example`, `scripts/bootstrap.ps1` (SQL migrations via `psql`), `scripts/verify_env.ps1`
+- [x] GitHub Actions `ci.yml`: ruff, format, mypy, pytest against a PostgreSQL service;
+      web lint/typecheck/unit/build/secret scan
+- [x] Hosted migration applied and verified; test data removed
+- [ ] `supabase db lint` / advisors — needs an authenticated scoped CLI token (documented gap)
 
-**Exit:** user can sign up, sign in, create a workspace; `/health` + `/ready` green; CI green.
-**Verify:** `pytest -q`, `npm run lint && npm run typecheck && npm run build`,
-`supabase db lint`, `docker compose config`.
-**Status:** implementation present, Supabase cut-over outstanding, verification incomplete.
+**Exit:** a user can authenticate with Supabase, is provisioned as a profile, and can create a
+workspace with an owner membership; `/health` and `/ready` are green; backend and frontend checks
+pass. **Reached and verified live.**
+
+**Verify:** `python -m pytest -q`; `ruff check .`; `ruff format --check .`; `mypy app`;
+`npm run lint && npm run typecheck && npm run test && npm run build`;
+`supabase db push --db-url …`.
 
 ---
 
@@ -747,13 +752,13 @@ impossible. No SQLite fallback.
 
 | # | Question | Default if unanswered | Blocks |
 |---|---|---|---|
-| Q1 | Supabase project: hosted project ref + keys, or a local stack once Docker is installed? | Hosted project (Docker absent) | **M1 cut-over** |
+| Q1 | Supabase project: hosted project ref + keys, or a local stack once Docker is installed? | **Resolved:** hosted project (Docker absent). Credentials live in the git-ignored `backend/.env` and `apps/web/.env` | — |
 | Q2 | Which cloud provider to wire first (`openai_compatible` vs `anthropic`)? | Implement both; no key required to build/test | M2 demo with a live model |
 | Q3 | Confirm the `simulation` provider is acceptable as the offline demo path (labelled `SIMULATED`)? | Yes | M2/M5 demo without keys |
-| Q4 | Prefer `uv` for Python env/deps, or stdlib `venv` + `pip`? | `venv` + `pip` | M1 ergonomics |
-| Q5 | Data API: keep disabled (recommended) or expose a narrow read-only `api` schema? | Disabled | PostgREST usage |
+| Q4 | Prefer `uv` for Python env/deps, or stdlib `venv` + `pip`? | **Resolved:** `venv` + `pip` on Python 3.12 | — |
+| Q5 | Data API: keep disabled (recommended) or expose a narrow read-only `api` schema? | **Resolved:** disabled; no grants on `app` to API roles | — |
 | Q6 | Seed the demo workspace automatically on first boot? | No — explicit `scripts/seed_demo.py` / `supabase seed.sql` | M2 demo |
-| Q7 | PostgreSQL 18 password for the local scratch DB used by integration tests? | Use a hosted Supabase scratch database instead | Integration tier |
+| Q7 | PostgreSQL 18 password for the local scratch DB used by integration tests? | **Resolved:** project-local cluster on `127.0.0.1:55432`, database `agentops_test` (never the hosted project) | — |
 
 ---
 
@@ -762,8 +767,8 @@ impossible. No SQLite fallback.
 | ID | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
 | R1 | No Docker → `supabase start` and the Compose path are unverifiable locally | High | Med | Hosted project for development; compose + local stack exercised in CI (GitHub runners have Docker) |
-| R2 | Supabase project not provisioned yet (needs account, keys, region choice) | High | **High** | Ask now (Q1); the plan documents the exact env keys required |
-| R3 | Database password unknown for the local scratch DB | High | Med | Q7; otherwise use a hosted scratch database |
+| R2 | Supabase project not provisioned yet (needs account, keys, region choice) | **Resolved** | — | Project provisioned (`ap-northeast-2`), migration applied, live flow verified (`docs/supabase.md` §8) |
+| R3 | Database password unknown for the local scratch DB | **Resolved** | — | Project-local cluster on port 55432; tests apply the same migrations with `psql` |
 | R4 | Supabase free-tier limits (DB size, egress, MAU, pausing) | Med | Med | Size monitoring, explicit "unavailable" states, plan upgrade path documented |
 | R5 | pgvector cost/performance at scale | Med | Low–Med | HNSW indexes, hybrid retrieval, chunk-size tuning, cap top-K |
 | R6 | Pooler transaction-mode caveats (session state, prepared statements) | Med | Med | No session-level state in transactions; `FOR UPDATE SKIP LOCKED` instead of advisory locks |
@@ -801,10 +806,11 @@ cd backend
 python -m pytest -q
 python -m pytest tests/unit -q
 python -m pytest tests/integration -q
-python -m pytest tests/security -q
-ruff check . && ruff format --check .
+ruff check .
+ruff format --check .
 mypy app
-uvicorn app.main:app --reload --port 8000
+python -m app                                    # Windows: selector loop wired automatically
+# uvicorn app.main:app --reload --port 8000 --loop app.loop:selector_loop_factory
 
 # frontend
 cd apps/web

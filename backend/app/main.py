@@ -27,8 +27,9 @@ AgentOps is an AI agent engineering and operations platform.
 * **Evaluate** quality with reproducible suites and regression gates
 * **Govern** permissions, budgets and human approvals
 
-All endpoints are versioned under `/api/v1` and require an authenticated session
-(or a scoped API key) unless stated otherwise.
+All endpoints are versioned under `/api/v1` and require a Supabase access token
+(or a scoped API key) presented as `Authorization: Bearer <token>`, unless the
+endpoint is explicitly public.
 """
 
 

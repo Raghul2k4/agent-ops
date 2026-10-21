@@ -13,11 +13,12 @@ from app.api.v1.deps import (
     get_db,
     require_workspace_scope,
 )
+from app.api.v1.serializers import workspace_read
 from app.core.config import settings
 from app.core.errors import PermissionDenied, ResourceNotFound
 from app.core.logging import get_logger
-from app.core.permissions import Permission
-from app.models.identity import User, WorkspaceMember
+from app.core.permissions import Permission, Role, role_has_permission
+from app.models.identity import Profile, WorkspaceMember
 from app.schemas.identity import (
     MemberInviteRequest,
     MemberRead,
@@ -33,19 +34,28 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix=settings.api_prefix, tags=["workspaces"])
 
+_REQUIRES_IDENTITY = "This endpoint requires a user identity; API keys are not supported here."
 
-def _to_read(workspace, role, member_count: int | None = None) -> WorkspaceRead:  # type: ignore[no-untyped-def]
-    return WorkspaceRead(
-        id=workspace.id,
-        name=workspace.name,
-        slug=workspace.slug,
-        owner_id=workspace.owner_id,
-        role=role,
-        member_count=member_count,
-        settings=workspace.settings or {},
-        created_at=workspace.created_at,
-        updated_at=workspace.updated_at,
-    )
+
+def _require_profile(context: AuthContext) -> Profile:
+    """Reject API-key callers from user-scoped workspace endpoints."""
+    if context.profile is None:
+        raise PermissionDenied(_REQUIRES_IDENTITY)
+    return context.profile
+
+
+def _require_workspace_permission(role, permission: Permission) -> None:  # type: ignore[no-untyped-def]
+    """Authorize against the caller's role *in this workspace*.
+
+    ``AuthContext.permissions`` is the union across every workspace the user
+    belongs to, so it must never be used to authorize a workspace-scoped
+    mutation: an owner of workspace A would otherwise be able to edit
+    workspace B where they are only a viewer.
+    """
+    if not role_has_permission(role, permission):
+        raise PermissionDenied(
+            f"This action requires the '{permission.value}' permission in this workspace."
+        )
 
 
 @router.get("/workspaces", response_model=list[WorkspaceRead], summary="List my workspaces")
@@ -54,12 +64,10 @@ async def list_workspaces(
     session: AsyncSession = Depends(get_db),
 ) -> list[WorkspaceRead]:
     """List the workspaces the caller belongs to."""
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
-    memberships = await workspace_service.list_workspaces_for_user(session, user=user)
+    profile = _require_profile(context)
+    memberships = await workspace_service.list_workspaces_for_user(session, profile=profile)
     counts = await workspace_service.member_counts(session, [ws.id for ws, _ in memberships])
-    return [_to_read(ws, role, counts.get(ws.id)) for ws, role in memberships]
+    return [workspace_read(ws, role, counts.get(ws.id)) for ws, role in memberships]
 
 
 @router.post(
@@ -74,11 +82,9 @@ async def create_workspace(
     session: AsyncSession = Depends(get_db),
 ) -> WorkspaceRead:
     """Create a workspace owned by the caller."""
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
+    profile = _require_profile(context)
     workspace, membership = await workspace_service.create_workspace(
-        session, owner=user, name=payload.name
+        session, owner=profile, name=payload.name
     )
     await audit_service.record_event(
         session,
@@ -86,17 +92,15 @@ async def create_workspace(
         resource_type="workspace",
         resource_id=str(workspace.id),
         workspace_id=workspace.id,
-        actor_id=user.id,
+        actor_id=profile.id,
         outcome="success",
         metadata={"name": workspace.name},
     )
     await session.commit()
-    return _to_read(workspace, membership.role, 1)
+    return workspace_read(workspace, Role(membership.role), 1)
 
 
-@router.get(
-    "/workspaces/{workspace_id}", response_model=WorkspaceRead, summary="Get a workspace"
-)
+@router.get("/workspaces/{workspace_id}", response_model=WorkspaceRead, summary="Get a workspace")
 async def get_workspace(
     workspace_id: uuid.UUID,
     context: AuthContext = Depends(get_auth_context),
@@ -104,14 +108,12 @@ async def get_workspace(
 ) -> WorkspaceRead:
     """Fetch a single workspace the caller is a member of."""
     require_workspace_scope(context, workspace_id)
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
+    profile = _require_profile(context)
     workspace, role = await workspace_service.get_workspace_for_member(
-        session, workspace_id=workspace_id, user=user
+        session, workspace_id=workspace_id, profile=profile
     )
     counts = await workspace_service.member_counts(session, [workspace.id])
-    return _to_read(workspace, role, counts.get(workspace.id))
+    return workspace_read(workspace, role, counts.get(workspace.id))
 
 
 @router.patch(
@@ -125,14 +127,11 @@ async def update_workspace(
 ) -> WorkspaceRead:
     """Update workspace metadata. Requires `workspace.update`."""
     require_workspace_scope(context, workspace_id)
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
+    profile = _require_profile(context)
     workspace, role = await workspace_service.get_workspace_for_member(
-        session, workspace_id=workspace_id, user=user
+        session, workspace_id=workspace_id, profile=profile
     )
-    if not context.has(Permission.WORKSPACE_UPDATE):
-        raise PermissionDenied("This action requires the 'workspace.update' permission.")
+    _require_workspace_permission(role, Permission.WORKSPACE_UPDATE)
     if payload.name is not None:
         workspace.name = payload.name.strip()
     if payload.settings is not None:
@@ -144,11 +143,11 @@ async def update_workspace(
         resource_type="workspace",
         resource_id=str(workspace.id),
         workspace_id=workspace.id,
-        actor_id=user.id,
+        actor_id=profile.id,
         outcome="success",
     )
     await session.commit()
-    return _to_read(workspace, role)
+    return workspace_read(workspace, role)
 
 
 @router.get(
@@ -163,24 +162,22 @@ async def list_members(
 ) -> list[MemberRead]:
     """List the members of a workspace."""
     require_workspace_scope(context, workspace_id)
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
+    profile = _require_profile(context)
     await workspace_service.get_workspace_for_member(
-        session, workspace_id=workspace_id, user=user
+        session, workspace_id=workspace_id, profile=profile
     )
     members = await workspace_service.list_members(session, workspace_id=workspace_id)
     return [
         MemberRead(
             id=member.id,
             user_id=member.user_id,
-            email=member_user.email,
-            display_name=member_user.display_name,
+            email=member_profile.email,
+            display_name=member_profile.display_name,
             role=member.role,
             status=member.status,
             created_at=member.created_at,
         )
-        for member, member_user in members
+        for member, member_profile in members
     ]
 
 
@@ -198,22 +195,17 @@ async def add_member(
 ) -> MemberRead:
     """Add an existing user to the workspace."""
     require_workspace_scope(context, workspace_id)
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
-    workspace, _ = await workspace_service.get_workspace_for_member(
-        session, workspace_id=workspace_id, user=user
+    profile = _require_profile(context)
+    workspace, role = await workspace_service.get_workspace_for_member(
+        session, workspace_id=workspace_id, profile=profile
     )
-    if not context.has(Permission.WORKSPACE_MANAGE_MEMBERS):
-        raise PermissionDenied(
-            "This action requires the 'workspace.manage_members' permission."
-        )
+    _require_workspace_permission(role, Permission.WORKSPACE_MANAGE_MEMBERS)
     member = await workspace_service.add_member(
         session,
         workspace=workspace,
         email=payload.email,
         role=payload.role,
-        invited_by=user.id,
+        invited_by=profile.id,
     )
     await audit_service.record_event(
         session,
@@ -221,17 +213,17 @@ async def add_member(
         resource_type="workspace_member",
         resource_id=str(member.id),
         workspace_id=workspace.id,
-        actor_id=user.id,
+        actor_id=profile.id,
         outcome="success",
         metadata={"role": member.role},
     )
     await session.commit()
-    added_user = await session.get(User, member.user_id)
+    added_profile = await session.get(Profile, member.user_id)
     return MemberRead(
         id=member.id,
         user_id=member.user_id,
-        email=added_user.email if added_user else "",
-        display_name=added_user.display_name if added_user else "",
+        email=added_profile.email if added_profile else "",
+        display_name=added_profile.display_name if added_profile else "",
         role=member.role,
         status=member.status,
         created_at=member.created_at,
@@ -252,16 +244,11 @@ async def update_member_role(
 ) -> MemberRead:
     """Change the role of a workspace member."""
     require_workspace_scope(context, workspace_id)
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
-    workspace, _ = await workspace_service.get_workspace_for_member(
-        session, workspace_id=workspace_id, user=user
+    profile = _require_profile(context)
+    workspace, role = await workspace_service.get_workspace_for_member(
+        session, workspace_id=workspace_id, profile=profile
     )
-    if not context.has(Permission.WORKSPACE_MANAGE_MEMBERS):
-        raise PermissionDenied(
-            "This action requires the 'workspace.manage_members' permission."
-        )
+    _require_workspace_permission(role, Permission.WORKSPACE_MANAGE_MEMBERS)
     member = await session.get(WorkspaceMember, member_id)
     if member is None or member.workspace_id != workspace.id:
         raise ResourceNotFound("Workspace member not found.")
@@ -272,17 +259,17 @@ async def update_member_role(
         resource_type="workspace_member",
         resource_id=str(member.id),
         workspace_id=workspace.id,
-        actor_id=user.id,
+        actor_id=profile.id,
         outcome="success",
         metadata={"role": member.role},
     )
     await session.commit()
-    member_user = await session.get(User, member.user_id)
+    member_profile = await session.get(Profile, member.user_id)
     return MemberRead(
         id=member.id,
         user_id=member.user_id,
-        email=member_user.email if member_user else "",
-        display_name=member_user.display_name if member_user else "",
+        email=member_profile.email if member_profile else "",
+        display_name=member_profile.display_name if member_profile else "",
         role=member.role,
         status=member.status,
         created_at=member.created_at,
@@ -303,16 +290,11 @@ async def remove_member(
 ) -> Response:
     """Remove a member from the workspace."""
     require_workspace_scope(context, workspace_id)
-    user = context.user
-    if user is None:
-        raise PermissionDenied("This endpoint requires an interactive session.")
-    workspace, _ = await workspace_service.get_workspace_for_member(
-        session, workspace_id=workspace_id, user=user
+    profile = _require_profile(context)
+    workspace, role = await workspace_service.get_workspace_for_member(
+        session, workspace_id=workspace_id, profile=profile
     )
-    if not context.has(Permission.WORKSPACE_MANAGE_MEMBERS):
-        raise PermissionDenied(
-            "This action requires the 'workspace.manage_members' permission."
-        )
+    _require_workspace_permission(role, Permission.WORKSPACE_MANAGE_MEMBERS)
     member = await session.get(WorkspaceMember, member_id)
     if member is None or member.workspace_id != workspace.id:
         raise ResourceNotFound("Workspace member not found.")
@@ -323,7 +305,7 @@ async def remove_member(
         resource_type="workspace_member",
         resource_id=str(member_id),
         workspace_id=workspace.id,
-        actor_id=user.id,
+        actor_id=profile.id,
         outcome="success",
     )
     await session.commit()

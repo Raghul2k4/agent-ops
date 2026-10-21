@@ -32,10 +32,25 @@ export interface MemberRead {
   created_at: string
 }
 
+/**
+ * Response of the development auth endpoints (`AUTH_MODE=local`).
+ *
+ * In Supabase mode the browser obtains the token from the Supabase SDK instead;
+ * this shape is not used there.
+ */
 export interface AuthResponse {
+  access_token: string
+  token_type: 'bearer'
+  expires_at: string
   user: UserRead
   workspaces: WorkspaceRead[]
-  expires_at: string
+}
+
+/** Public description of how this deployment authenticates browsers. */
+export interface AuthModeInfo {
+  auth_mode: 'supabase' | 'local'
+  local_sign_in_enabled: boolean
+  supabase_url: string | null
 }
 
 export interface MeResponse {

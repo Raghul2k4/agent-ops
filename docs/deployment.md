@@ -1,103 +1,171 @@
-# AgentOps — Local Environment Setup
+# AgentOps — Development & Deployment Setup
 
-This guide gets a working local AgentOps environment on Windows (the current development
-machine). It is the authoritative local setup path; `docker-compose.yml` is the container
-equivalent used in CI and production-like environments.
+This is the authoritative setup guide for the current codebase (M0 + M1).
+
+- **Application database:** hosted **Supabase Postgres** through the transaction pooler.
+- **Identity:** hosted **Supabase Auth**; the API verifies access tokens via JWKS.
+- **Tests:** a **disposable local PostgreSQL 18** database, using the same SQL migrations.
+
+Docker is optional and currently not installed on the development machine; see
+[§9](#9-docker--supabase-local-stack-optional).
 
 ---
 
 ## 1. Prerequisites
 
-| Component | Required | Verified on this machine |
+| Component | Version | Purpose |
 |---|---|---|
-| Python | 3.12 (3.14 also works for core stack) | 3.12.7 / 3.14.7 installed |
-| Node.js | 20+ (24 recommended) | 24.20.0 |
-| Git | 2.40+ | 2.55.0 |
-| PostgreSQL | 14+ (18 used here) | 18 x64, running on 127.0.0.1:5432 |
-| Docker | optional (CI/prod path) | not installed locally |
-| Redis | optional (background jobs fallback) | not installed locally |
+| Python | 3.12 | FastAPI service |
+| Node.js | 20+ (24 used here) | Web app |
+| Supabase CLI | 2.x | Migrations, local stack |
+| PostgreSQL | 18 | Disposable test database + `psql` (the test harness needs `psql`) |
+| Git | 2.40+ | Version control |
+| Docker | optional | `supabase start`, Compose |
+
+Verify the machine:
+
+```powershell
+.\scripts\verify_env.ps1
+```
 
 ---
 
-## 2. PostgreSQL access (do this first — it blocks migrations and tests)
+## 2. Hosted Supabase
 
-The local PostgreSQL 18 install uses `scram-sha-256` for every connection, so the application
-cannot connect until a password is set. The server itself is healthy; only credentials are
-missing.
+### 2.1 Project values
 
-### 2.1 Reset the `postgres` superuser password (run as Administrator PowerShell)
+From the Supabase dashboard (**Project Settings → API**):
 
-This is a **local development machine only**. The trust window below is limited to
-`127.0.0.1`/`::1` and is closed immediately afterwards.
+| Value | Where it goes | Visibility |
+|---|---|---|
+| Project URL | `SUPABASE_URL`, `VITE_SUPABASE_URL` | public |
+| Publishable key (`sb_publishable_…`) | `VITE_SUPABASE_PUBLISHABLE_KEY` | public |
+| Database password | `DATABASE_URL`, CLI migrations | **secret** |
+| Secret key / service role | not required in M1 | **secret** |
+| Personal access token (scoped) | CI / `supabase` CLI login | **secret** |
 
-```powershell
-# 1. Stop the service
-Stop-Service postgresql-x64-18
+Never put a secret value in `apps/web/.env`, and never prefix one with `VITE_`.
 
-# 2. Open pg_hba.conf for editing
-notepad "C:\Program Files\PostgreSQL\18\data\pg_hba.conf"
-
-#    Change ONLY these two lines (from scram-sha-256 to trust):
-#      host    all    all    127.0.0.1/32    scram-sha-256
-#      host    all    all    ::1/128         scram-sha-256
-#    Leave every other line untouched. Save and close.
-
-# 3. Start the service again
-Start-Service postgresql-x64-18
-
-# 4. Set the postgres password (trust auth means no password is needed right now)
-$env:PGPASSWORD = ""
-& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h 127.0.0.1 -p 5432 -d postgres -w `
-    -c "ALTER USER postgres WITH PASSWORD 'CHANGE_ME_strong_local_password';"
-
-# 5. Close the trust window again: in pg_hba.conf restore both lines to scram-sha-256
-notepad "C:\Program Files\PostgreSQL\18\data\pg_hba.conf"
-Stop-Service postgresql-x64-18
-Start-Service postgresql-x64-18
-
-# 6. Verify the new password works
-$env:PGPASSWORD = "CHANGE_ME_strong_local_password"
-& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h 127.0.0.1 -p 5432 -d postgres -w -c "select version();"
-```
-
-### 2.2 Create the least-privilege application role and databases
-
-Run with the password from step 2.1. The app role is **not** a superuser; it only needs
-`CREATEDB` so the test database can be created and dropped.
-
-```powershell
-$env:PGPASSWORD = "CHANGE_ME_strong_local_password"
-$PSQL = "C:\Program Files\PostgreSQL\18\bin\psql.exe"
-
-& $PSQL -U postgres -h 127.0.0.1 -p 5432 -d postgres -w -c `
-  "CREATE ROLE agentops WITH LOGIN PASSWORD 'agentops_local_dev' CREATEDB;"
-& $PSQL -U postgres -h 127.0.0.1 -p 5432 -d postgres -w -c `
-  "CREATE DATABASE agentops OWNER agentops;"
-& $PSQL -U postgres -h 127.0.0.1 -p 5432 -d postgres -w -c `
-  "CREATE DATABASE agentops_test OWNER agentops;"
-```
-
-### 2.3 Record the credentials
-
-Copy `.env.example` to `backend/.env` and set:
+### 2.2 `backend/.env`
 
 ```dotenv
-DATABASE_URL=postgresql+psycopg://agentops:agentops_local_dev@127.0.0.1:5432/agentops
-TEST_DATABASE_URL=postgresql+psycopg://agentops:agentops_local_dev@127.0.0.1:5432/agentops_test
+ENVIRONMENT=development
+AUTH_MODE=supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_JWT_AUDIENCE=authenticated
+
+# Application traffic: transaction pooler (port 6543), session-independent.
+DATABASE_URL=postgresql+psycopg://postgres.<project-ref>:<db-password>@aws-0-<region>.pooler.supabase.com:6543/postgres?sslmode=require
+
+# Tests only: a disposable local database, never the hosted project.
+TEST_DATABASE_URL=postgresql+psycopg://agentops@127.0.0.1:55432/agentops_test
+
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
-> `.env` is git-ignored. Never commit real credentials.
+The direct host `db.<project-ref>.supabase.co` is **IPv6-only** on this project; do not use it from
+the application. Migrations use the session pooler on the same host at port **5432**.
 
-### 2.4 pgvector (optional)
+> `backend/.env` is git-ignored. `.env.example` lists names only.
 
-This PostgreSQL 18 install does **not** include the `pgvector` extension, so AgentOps stores
-embeddings as `double precision[]` and computes cosine similarity in SQL (documented deviation
-D1 in `PLAN.md`). The application detects `pgvector` automatically and will use the native
-`vector` type and HNSW index once the extension is installed — no code change required.
+### 2.3 Apply the schema
+
+```powershell
+supabase db push `
+  --db-url "postgresql://postgres.<project-ref>:<db-password>@aws-0-<region>.pooler.supabase.com:5432/postgres" `
+  --include-all --yes --skip-vault
+```
+
+The password must be inline in `--db-url`. `--skip-vault` is required because the initial migration
+does not use Supabase Vault.
+
+Verify:
+
+```sql
+select table_name from information_schema.tables where table_schema = 'app' order by 1;
+-- 7 rows: api_keys, audit_events, local_credentials, profiles,
+--         workspace_members, workspace_preferences, workspaces
+
+select relname, relrowsecurity
+from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'app' and c.relkind = 'r';
+-- relrowsecurity = true for every row
+```
+
+`python -m pytest` applies the same migration to the test database automatically.
+
+### 2.4 Auth settings
+
+In **Authentication → Providers → Email**:
+
+- **Confirm email** — enabled by default. Sign-up then returns no session until the address is
+  confirmed, and the UI says so. For local development you may disable it in the dashboard (never
+  disable confirmation in production).
+- **Site URL / Redirect URLs** — add `http://localhost:5173` (and the deployed origin) so
+  confirmation links return to the app.
+- Built-in SMTP is rate-limited (a few messages per hour); repeated test sign-ups produce
+  `over_email_send_rate_limit`. Use your own SMTP provider for real use.
+
+### 2.5 `apps/web/.env`
+
+```dotenv
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+# VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1   # only if not using the dev proxy
+```
+
+The dev server proxies `/api` to `http://127.0.0.1:8000`, so no base URL is needed locally.
 
 ---
 
-## 3. Backend setup
+## 3. Local test database (PostgreSQL 18)
+
+The test suite applies the migrations with `psql` and truncates tables between tests. Use a
+throwaway database — **never** the hosted project.
+
+### 3.1 Option A — the project-local cluster on port 55432
+
+A cluster lives in `.devdb/` (git-ignored), isolated from any system PostgreSQL service:
+
+```powershell
+# start
+& "C:\Program Files\PostgreSQL\18\bin\pg_ctl.exe" -D .devdb\data `
+  -o '"-p 55432 -c listen_addresses=127.0.0.1"' -l .devdb\server.log start
+
+# stop
+& "C:\Program Files\PostgreSQL\18\bin\pg_ctl.exe" -D .devdb\data stop
+```
+
+Create the role and databases once (superuser `agentops` on this cluster):
+
+```powershell
+$env:PGPASSWORD = '<local superuser password>'
+$psql = "C:\Program Files\PostgreSQL\18\bin\psql.exe"
+& $psql -h 127.0.0.1 -p 55432 -U agentops -d postgres -c "create database agentops;"
+& $psql -h 127.0.0.1 -p 55432 -U agentops -d postgres -c "create database agentops_test;"
+```
+
+`TEST_DATABASE_URL=postgresql+psycopg://agentops:<password>@127.0.0.1:55432/agentops_test`.
+
+### 3.2 Option B — an existing PostgreSQL instance
+
+Create `agentops_test`, point `TEST_DATABASE_URL` at it, and make sure `psql` is on `PATH` (or set
+`PSQL_BIN`). pgvector is **not** required by the M1 migration.
+
+### 3.3 How the tests use it
+
+`backend/tests/conftest.py`:
+
+1. Drops and recreates the `app` / `app_private` schemas (and the local `auth` shim).
+2. Runs every `supabase/migrations/*.sql` file in order with `psql -v ON_ERROR_STOP=1`.
+3. Truncates the known tables between tests.
+4. Runs `supabase/tests/rls_policies.sql` for the RLS assertions.
+
+If `psql` is missing, database tests **skip** with an explicit message; they never silently pass.
+
+---
+
+## 4. Backend
 
 ```powershell
 cd backend
@@ -105,60 +173,122 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
-alembic upgrade head
+
+python -m app          # http://127.0.0.1:8000
 ```
 
-## 4. Frontend setup
+- API docs: <http://127.0.0.1:8000/docs>
+- Liveness: <http://127.0.0.1:8000/health>
+- Readiness: <http://127.0.0.1:8000/ready>
+
+**Windows note:** `psycopg` async requires a selector event loop, while uvicorn hard-wires the
+Proactor loop on Windows. `python -m app` passes `loop="app.loop:selector_loop_factory"`
+automatically. With the CLI, use:
 
 ```powershell
-cd apps/web
-npm install
-npm run dev      # http://localhost:5173
+uvicorn app.main:app --reload --port 8000 --loop app.loop:selector_loop_factory
 ```
 
-## 5. Run the stack
+Without it, requests can hang and `/ready` reports a degraded database.
+
+---
+
+## 5. Frontend
 
 ```powershell
-# terminal 1 — backend
-cd backend
-.\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload --port 8000
-
-# terminal 2 — frontend
-cd apps/web
-npm run dev
+cd apps\web
+npm ci
+npm run dev            # http://localhost:5173
 ```
 
-- API docs: http://localhost:8000/docs
-- Health: http://localhost:8000/health · Readiness: http://localhost:8000/ready
+The sign-in screen reads `GET /api/v1/auth/mode`:
 
-## 6. Tests
+- `supabase` → email/password through Supabase Auth (publishable key only).
+- `local` → development issuer (`/auth/login`), only when the API runs with `AUTH_MODE=local`.
+
+If the API says `supabase` and the bundle has no `VITE_SUPABASE_URL`/publishable key, the screen
+shows a configuration error instead of falling back.
+
+---
+
+## 6. Tests and quality gates
 
 ```powershell
+# backend
 cd backend
 python -m pytest -q
+ruff check . ; ruff format --check . ; mypy app
+
+# frontend
+cd apps\web
+npm run lint ; npm run typecheck ; npm run test ; npm run build
 ```
 
-The integration tier requires `TEST_DATABASE_URL` and the `agentops_test` database from §2.2.
-Unit tests run without a database.
+`npm run build` ends with `node scripts/check-bundle-secrets.mjs`, which fails the build if a
+secret-shaped value, a Postgres URL or a server-only variable's value appears in `dist/`.
+
+Test environment is pinned by `backend/tests/conftest.py` (`ENVIRONMENT=test`, `AUTH_MODE=local`);
+the hosted project is never contacted.
 
 ---
 
-## 7. Container path (CI / production-like)
+## 7. CI
 
-`docker compose up --build` starts PostgreSQL, Redis, the API and the web app with the same
-`.env` variable names. This path is exercised in CI; it requires Docker, which is not
-installed on this development machine.
+`.github/workflows/ci.yml` runs two jobs:
+
+1. **backend** — Python 3.12, a PostgreSQL 17 service, `pip install -e ".[dev]"`, ruff, format
+   check, mypy, pytest. The service database is the same scratch database used locally.
+2. **web** — Node 22, `npm ci`, lint, typecheck, unit tests, production build + secret scan.
+
+CI never calls a paid model provider and never receives the Supabase secret key.
 
 ---
 
-## 8. Troubleshooting
+## 8. Production deployment (checklist)
+
+- Separate Supabase project for production; migrations applied with a scoped access token.
+- `ENVIRONMENT=production`, `AUTH_MODE=supabase`, debug off.
+- API behind TLS; `CORS_ORIGINS` limited to the real web origin.
+- Secrets in the platform secret store, not in image layers or build args.
+- Web bundle built with only `VITE_SUPABASE_URL` + publishable key.
+- Health/readiness probes wired to `/health` and `/ready`.
+- Backups/PITR enabled; restore drill documented.
+- Key rotation rehearsed (`docs/supabase.md` §7.1).
+
+Not yet automated: infrastructure-as-code, blue/green rollout, and metrics/tracing exporters.
+
+---
+
+## 9. Docker / Supabase local stack (optional)
+
+Docker is not installed on the development machine, so these paths are **unverified**:
+
+```powershell
+supabase start        # local Postgres, Auth, Studio, Storage, Realtime
+supabase db reset     # migrations + seed.sql
+supabase status
+supabase db lint      # needs Docker and a running local stack
+```
+
+`supabase/config.toml` is committed and ready. `docker compose up --build` describes the API + web
+containers; it has not been executed locally.
+
+---
+
+## 10. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `FATAL: password authentication failed for user "agentops"` | wrong password or role not created | rerun §2.1/§2.2 |
-| `FATAL: role "agentops" does not exist` | role creation step skipped | rerun §2.2 |
-| `password authentication failed` immediately after changing pg_hba | service not restarted | `Restart-Service postgresql-x64-18` |
-| `could not connect to server` | service stopped | `Start-Service postgresql-x64-18` |
-| Alembic `relation "users" does not exist` | migrations not applied | `alembic upgrade head` |
-| Frontend `Failed to fetch` | API not running or CORS origin mismatch | start uvicorn; check `CORS_ORIGINS` |
+| `password authentication failed for user "postgres.<ref>"` | wrong DB password or wrong pooler user format | use `postgres.<project-ref>` and the current password; rotate if unknown |
+| `could not translate host name "db.<ref>.supabase.co"` / connection timeout | direct host is IPv6-only | use the pooler host on 6543 (app) or 5432 (migrations) |
+| `InvalidSqlStatementName` / prepared-statement errors | server-side prepares across pooled transactions | ensure `prepare_threshold=None` in the engine (already set) |
+| `/ready` says `database: unavailable` | DB unreachable or event loop is Proactor | start with `python -m app`; check `DATABASE_URL` |
+| `/ready` says `auth: unavailable` | JWKS unreachable or wrong `SUPABASE_URL` | check network and URL; the JWKS path is `/auth/v1/.well-known/jwks.json` |
+| `401 AUTHENTICATION_REQUIRED` with a fresh token | wrong project, wrong audience, or clock skew | verify `SUPABASE_URL`/`SUPABASE_JWT_AUDIENCE`; check system clock |
+| Sign-up returns 429 `over_email_send_rate_limit` | built-in SMTP quota | wait, or configure custom SMTP; this is not an API error |
+| Sign-up succeeds but there is no session | email confirmation enabled | confirm the address, or disable confirmation for local development |
+| Login screen shows “Supabase is not configured” | missing `VITE_*` values | create `apps/web/.env` and restart Vite |
+| RLS tests skip | `psql` not found | install PostgreSQL client or set `PSQL_BIN` |
+| `npm run build` fails in the secret scan | a server-only value leaked into the bundle | remove it from `VITE_*`; rotate the secret if it was real |
+| `supabase db lint` fails to authenticate | CLI not logged in | `supabase login` with a scoped token (never a classic full-access PAT) |
+| Local cluster will not start | stale `postmaster.pid` or port in use | stop the process, remove `.devdb/data/postmaster.pid`, retry |

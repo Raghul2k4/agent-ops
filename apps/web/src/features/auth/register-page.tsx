@@ -1,6 +1,7 @@
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useState } from 'react'
 import { useForm } from 'react-hook-form'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
 import { Button } from '@/components/ui/button'
@@ -23,8 +24,9 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>
 
 export function RegisterPage() {
-  const { signUp } = useSession()
+  const { signUp, isAuthenticated, configurationError } = useSession()
   const navigate = useNavigate()
+  const [confirmationEmail, setConfirmationEmail] = useState<string | null>(null)
   const {
     register,
     handleSubmit,
@@ -35,9 +37,19 @@ export function RegisterPage() {
     defaultValues: { display_name: '', email: '', password: '' },
   })
 
+  if (isAuthenticated) {
+    return <Navigate to="/" replace />
+  }
+
   async function onSubmit(values: FormValues) {
     try {
-      await signUp(values)
+      const outcome = await signUp(values)
+      if (outcome.needsEmailConfirmation) {
+        // Supabase created the identity but no session exists until the address
+        // is confirmed. Say so explicitly instead of pretending sign-up finished.
+        setConfirmationEmail(values.email)
+        return
+      }
       navigate('/')
     } catch (error) {
       if (error instanceof ApiError) {
@@ -48,8 +60,39 @@ export function RegisterPage() {
         setError('root', { message: error.message })
         return
       }
+      if (error instanceof Error && error.message) {
+        setError('root', { message: error.message })
+        return
+      }
       setError('root', { message: 'Unexpected error. Please try again.' })
     }
+  }
+
+  if (confirmationEmail) {
+    return (
+      <AuthLayout
+        title="Confirm your email address"
+        subtitle="One more step before your workspace is created."
+      >
+        <div className="space-y-3 text-xs text-[var(--muted-foreground)]">
+          <p>
+            Supabase sent a confirmation link to{' '}
+            <span className="font-mono text-[var(--foreground)]">{confirmationEmail}</span>.
+          </p>
+          <p>
+            Open the link in this browser to finish signing in. AgentOps creates your profile on
+            the first authenticated request, so the workspace setup screen appears right after.
+          </p>
+          <p>
+            No email? Check the Supabase project&apos;s Auth logs and your spam folder. This
+            deployment does not confirm addresses automatically.
+          </p>
+          <Link to="/login" className="inline-block text-[var(--primary)] hover:underline">
+            Back to sign in
+          </Link>
+        </div>
+      </AuthLayout>
+    )
   }
 
   return (
@@ -57,6 +100,15 @@ export function RegisterPage() {
       title="Create your AgentOps account"
       subtitle="You will create a workspace next - every agent, workflow and trace lives inside it."
     >
+      {configurationError ? (
+        <div
+          className="mb-4 rounded-md border border-[var(--warning)]/30 bg-[var(--warning-muted)] px-3 py-2 text-xs text-[var(--warning)]"
+          role="alert"
+        >
+          {configurationError}
+        </div>
+      ) : null}
+
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
         {errors.root?.message ? (
           <div
@@ -110,7 +162,12 @@ export function RegisterPage() {
           <FieldHint>At least 10 characters, including a letter and a digit.</FieldHint>
         </div>
 
-        <Button type="submit" className="w-full" loading={isSubmitting}>
+        <Button
+          type="submit"
+          className="w-full"
+          loading={isSubmitting}
+          disabled={Boolean(configurationError)}
+        >
           Create account
         </Button>
 
