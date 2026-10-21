@@ -295,6 +295,7 @@ bootstrap, not a product code path: the application never writes to `auth.*`.
 | RLS regression | `supabase/tests/rls_policies.sql` passes on the hosted project with the M2 tables present |
 | Provider credential | Stored only as the environment-variable name `OPENROUTER_API_KEY`; the value never reached the database, an API response, the logs or the browser bundle |
 | Browser end-to-end | Workspace → provider → model → agent → publish → run → trace, exercised in a real browser against the hosted project |
+| Retained demo data | The hosted project keeps one demonstration workspace (`AgentOps Demo`) with 3 agents, 5 runs, the synthetic CRM dataset and both providers, so the platform can be inspected without re-seeding. The demo identity is bootstrapped with SQL because the project requires email confirmation; **its password is not stored in this repository** |
 
 ---
 
