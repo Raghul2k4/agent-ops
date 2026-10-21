@@ -6,10 +6,11 @@ AgentOps lets a team design AI agents and visual workflows, execute them against
 and models, inspect every execution trace, benchmark model quality, and govern what agents are
 allowed to do.
 
-> **Status: M0 + M1 delivered and verified.** Supabase Auth owns identity, Supabase Postgres is the
-> system of record, and the FastAPI service verifies every Supabase access token against the
-> project's JWKS. The remaining milestones (agents, workflows, runs, evaluations, knowledge) are
-> tracked in [`docs/roadmap.md`](docs/roadmap.md) and [`PLAN.md`](PLAN.md).
+> **Status: M0, M1 and M2 delivered and verified.** Supabase Auth owns identity, Supabase Postgres
+> is the system of record, and the FastAPI service verifies every Supabase access token against the
+> project's JWKS. Agents, provider adapters, the tool registry, the runtime, persisted runs and
+> traces are live; the remaining milestones (workflows, approvals, evaluations, knowledge, analytics)
+> are tracked in [`docs/roadmap.md`](docs/roadmap.md) and [`PLAN.md`](PLAN.md).
 >
 > Nothing in this repository is mocked-up "success": a feature is listed only when its backend,
 > persistence, authorization and tests exist and have been run. Hosted-Supabase verification is
@@ -21,11 +22,38 @@ allowed to do.
 
 | Capability | Scope | Status |
 |---|---|---|
-| **Build** | Agents with versioned configuration; visual workflow canvas | Planned (M2/M4) |
-| **Execute** | Custom runtime, registered tools, provider adapters (Ollama / OpenAI-compatible / Anthropic / labelled simulation) | Planned (M2) |
-| **Observe** | Persistent run history, hierarchical traces, live updates, safe replay | Planned (M3) |
+| **Build** | Agents with versioned configuration, drafts and immutable published versions; visual workflow canvas | Agents delivered (M2); canvas planned (M4) |
+| **Execute** | Custom runtime, registered tools, provider adapters (Ollama / OpenAI-compatible / Anthropic / labelled simulation) | Delivered (M2) |
+| **Observe** | Persistent run history, hierarchical traces, live event stream, safe replay | Runs and traces delivered (M2); replay planned (M3) |
 | **Evaluate** | Suites, deterministic scorers, regression gates | Planned (M6) |
-| **Govern** | Workspace RBAC (delivered), tool allowlists, budgets, approvals, audit log | M1 delivers identity, workspaces, roles, audit |
+| **Govern** | Workspace RBAC (delivered), tool risk classification, budgets, approvals, audit log | RBAC, risk and budgets delivered (M1/M2); approval decisions planned (M3) |
+
+---
+
+## What M2 actually delivers
+
+- **Provider abstraction** — one `Provider` contract with adapters for Ollama, OpenAI-compatible
+  endpoints (OpenAI, OpenRouter, vLLM, LM Studio), Anthropic and a clearly labelled deterministic
+  simulation. Health checks, model discovery and per-model capability and pricing metadata.
+- **Credentials by reference** — a provider stores only the *name* of a server-side environment
+  variable. The API never accepts, stores or returns a credential value.
+- **Tool registry** — nine built-in CRM tools over a synthetic dataset, each with a strict input
+  schema, a risk level, required permissions, a timeout and an approval flag. The runtime resolves
+  tools server-side; a model cannot invent a tool or widen its own permissions.
+- **Agent runtime** — drafts, immutable published versions, publish/rollback/duplicate/archive, a
+  bounded model/tool loop (steps, tool calls, wall clock, tokens, cost), cancellation, per-call
+  events and hierarchical trace spans. An identical call in one run is executed once; a run stopped
+  by a budget reports the work it completed.
+- **Persistence** — `supabase/migrations/20261021130000_agents_providers_tools_runtime.sql` adds 13
+  tables to the `app` schema with RLS on every one, plus a trigger that makes published versions
+  immutable.
+- **Frontend** — Agent Studio, the playground, run history and run detail (events, trace spans,
+  completed actions), the Model Lab and the tool registry.
+- **Verified end to end** — in a real browser against the hosted project: workspace → provider →
+  model → agent → publish → run → trace, first with the deterministic provider and then with a
+  hosted cloud model.
+- **Tests** — 159 backend tests and 22 frontend tests; ruff, ruff-format, mypy, eslint, tsc and the
+  production build (with the bundle secret scan) all pass.
 
 ---
 
@@ -105,6 +133,18 @@ the single source of truth. If the deployment says `supabase` but the bundle has
 configured, the sign-in screen shows an explicit setup message; it never falls back to local
 passwords.
 
+**Synthetic demo data.** The built-in CRM tools read a fictional dataset (7 customers, 12 deals, 5
+companies, 5 contacts) that is created only by an explicit, audited action — the
+*Load synthetic demo data* card on the Agents or Tools page, or
+`POST /api/v1/workspaces/{workspace_id}/demo-data`. Every demo row carries `is_demo = true` and is
+never mixed into a real workspace implicitly.
+
+**Model providers.** Add a provider in *Model Lab* by choosing a type, a base URL and the **name**
+of the environment variable that holds the credential (for example `OPENROUTER_API_KEY`). Put the
+value in `backend/.env`; the API loads that file into the process environment at startup and never
+stores or returns the value. The deterministic simulation provider needs no credential and labels
+every response with `[SIMULATED]`.
+
 ---
 
 ## Tests
@@ -149,7 +189,12 @@ The scratch database is separate from the hosted project: fixtures truncate it, 
 - **`supabase db lint` / advisors** need an authenticated Supabase CLI session (scoped access
   token); they were not run. The RLS assertions in `supabase/tests/rls_policies.sql` do run in the
   backend test suite against local Postgres.
-- **No model provider is configured yet** (M2). Nothing in M1 fabricates model output.
+- **No approval decisions yet** (M3). A high-risk tool pauses the run with a canonical argument
+  hash and does not execute; there is no queue, approve or reject endpoint yet.
+- **The workflow canvas, evaluations, knowledge hub, memory, scheduling and analytics are not
+  built** (M4, M6, M7). Those pages are explicit placeholders, not fakes.
+- **`search_knowledge` returns an empty result** until the Knowledge Hub lands (M6); it says so
+  instead of inventing an answer.
 - The hosted project is in `ap-northeast-2`; API requests pay a cross-region round-trip per query.
 
 ---

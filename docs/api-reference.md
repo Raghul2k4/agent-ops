@@ -2,9 +2,9 @@
 
 **Base path:** `/api/v1` (configurable via `API_PREFIX`)
 **Interactive docs:** `GET /docs` (OpenAPI), `GET /openapi.json`
-**Status:** M0 + M1 endpoints only. Routes for agents, workflows, runs, approvals, evaluations and
-knowledge are specified in `AGENTS.md` §25 and land with their milestones — they are not stubs in
-the service today.
+**Status:** M0, M1 and M2 endpoints are live. Routes for workflows, approvals, evaluations,
+knowledge, schedules and analytics are specified in `AGENTS.md` §25 and land with their milestones —
+they are not stubs in the service today.
 
 ---
 
@@ -270,16 +270,221 @@ documented in [`security.md`](security.md#32-roles).
 
 ---
 
-## 7. Error codes used in M1
+## 7. Agents, providers, tools and runs (M2)
 
-`VALIDATION_ERROR`, `AUTHENTICATION_REQUIRED`, `PERMISSION_DENIED`, `RESOURCE_NOT_FOUND`,
-`CONFLICT`, `RATE_LIMITED`, `POLICY_VIOLATION`, `INTERNAL_ERROR`. The remaining codes in
-`backend/app/core/errors.py` are reserved for execution, approvals, workflows and providers.
+All routes below take `workspace_id` as a query parameter and are tenant-scoped. A caller without an
+active membership receives `404`; another tenant's identifiers are never revealed.
+
+### 7.1 Agents — `/api/v1/agents`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `/templates` | GET | authenticated | Eight functional agent templates (key, name, category, system prompt, tool names, default parameters) |
+| `?workspace_id=` | GET | `agent.read` | List the workspace's agents with their published version and draft state |
+| `?workspace_id=` | POST | `agent.write` | Create an agent draft from a template or an explicit configuration |
+| `/{agent_id}` | GET | `agent.read` | Agent with draft configuration, published version and version list |
+| `/{agent_id}` | PATCH | `agent.write` | Update the **draft** (name, description, configuration, tools, limits) and optionally record a change note |
+| `/{agent_id}` | DELETE | `agent.write` | Delete the agent and its versions |
+| `/{agent_id}/archive` | POST | `agent.write` | Archive the agent without deleting history |
+| `/{agent_id}/versions` | GET | `agent.read` | Immutable published versions, newest first |
+| `/{agent_id}/publish` | POST | `agent.write` | Snapshot the draft into a new immutable version (`201`) |
+| `/{agent_id}/rollback` | POST | `agent.write` | Point the agent at a previous published version |
+| `/{agent_id}/duplicate` | POST | `agent.write` | Create a copy of the agent as a new draft |
+| `/{agent_id}/run` | POST | `run.execute` | Start a run against a published version (`202`, asynchronous) |
+
+Creating an agent:
+
+```json
+{
+  "name": "Sales Operations Assistant",
+  "description": "Finds stale high-value deals and drafts follow-ups.",
+  "template_key": "sales_followup_drafter",
+  "provider_id": "214bb5ad-…",
+  "model_config_id": "f474e9b6-…"
+}
+```
+
+Publishing snapshots `provider_id`, `model_config_id`, `model_name`, the system prompt, parameters,
+limits and tool ids into `app.agent_versions`. Published versions are immutable (a database trigger
+rejects updates) so a historical run stays interpretable.
+
+Starting a run:
+
+```json
+{ "input": { "message": "Find deals worth more than INR 50,000 …" } }
+```
+
+The response is the persisted `RunRead` with `status: "queued"`. The runtime then executes in the
+background and the client polls `GET /runs/{id}` (or consumes the SSE stream).
+
+### 7.2 Providers and models — `/api/v1/models`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `/providers?workspace_id=` | GET | `provider.read` | Providers with their registered models |
+| `/providers?workspace_id=` | POST | `provider.write` | Create a provider (`simulation`, `ollama`, `openai_compatible`, `anthropic`) |
+| `/providers/simulation?workspace_id=` | POST | `provider.write` | Idempotently ensure the labelled deterministic provider and its model exist |
+| `/providers/{provider_id}?workspace_id=` | GET | `provider.read` | One provider with models |
+| `/providers/{provider_id}?workspace_id=` | PATCH | `provider.write` | Rename, change base URL or secret reference, enable/disable |
+| `/providers/{provider_id}?workspace_id=` | DELETE | `provider.write` | Delete the provider |
+| `/providers/{provider_id}/test?workspace_id=` | POST | `provider.write` | Health check against the live provider |
+| `/providers/{provider_id}/models?workspace_id=` | POST | `provider.write` | Register a model with capability and pricing metadata |
+| `?workspace_id=` | GET | `provider.read` | All registered models in the workspace |
+| `/{model_id}?workspace_id=` | PATCH | `provider.write` | Update capabilities, pricing, default parameters, enabled/default flags |
+| `/{model_id}?workspace_id=` | DELETE | `provider.write` | Delete a model registration |
+
+Provider creation:
+
+```json
+{
+  "provider_type": "openai_compatible",
+  "display_name": "OpenRouter",
+  "base_url": "https://openrouter.ai/api/v1",
+  "secret_reference": "OPENROUTER_API_KEY"
+}
+```
+
+`secret_reference` is the **name** of a server-side environment variable. The credential itself is
+never accepted by the API, never stored in the database and never returned: responses carry
+`secret_reference` and `has_secret_reference` only. The value is resolved from the process
+environment when the provider is called.
+
+Model registration:
+
+```json
+{
+  "model_name": "dots-studio/dots-3-note-preview:free",
+  "display_name": "Dots 3 Note Preview (free)",
+  "capabilities": {
+    "supports_tools": true,
+    "supports_structured_output": true,
+    "supports_streaming": false,
+    "context_window": 512000
+  },
+  "pricing": { "input_per_million": 0, "output_per_million": 0 }
+}
+```
+
+Capabilities are tri-state: `true`, `false` or `null` for **unknown**. The platform never asserts
+that a model supports tool calling, structured output or streaming because it assumed so; an
+unknown capability is displayed as unknown. Pricing is optional — when it is absent the run reports
+the cost as unavailable, never as zero.
+
+The connection test never raises on a provider failure. It returns the diagnostic instead:
+
+```json
+{
+  "ok": false,
+  "status": "error",
+  "message": "The server-side environment variable AGENTOPS_LLM_API_KEY is not set.",
+  "models": [],
+  "checked_at": "2026-10-21T11:14:47Z"
+}
+```
+
+### 7.3 Tools — `/api/v1/tools`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `?workspace_id=` | GET | `tool.read` | The server-side tool registry: name, version, description, input/output schema, risk level, required permissions, timeout, approval requirement |
+
+Only tools registered in the server registry can execute. Model-proposed tool names and arguments
+are resolved and validated against that registry; a tool that is not registered is rejected with
+`INVALID_TOOL_ARGUMENTS`.
+
+### 7.4 Runs and traces — `/api/v1/runs`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `?workspace_id=` | GET | `run.read` | Paginated run history (`items`, `total`, `limit`, `offset`) |
+| `?workspace_id=` | POST | `run.execute` | Start a run for a published agent version |
+| `/{run_id}` | GET | `run.read` | One run: status, usage, cost, error code, output |
+| `/{run_id}/events?after_seq=` | GET | `run.read` | Ordered events with a cursor (`last_sequence`, `has_more`) |
+| `/{run_id}/events/stream` | GET | `run.read` | Server-Sent Events for live updates; reconnects with `after_seq` |
+| `/{run_id}/trace` | GET | `run.read` | Hierarchical trace spans (agent run, model call, tool call) |
+| `/{run_id}/cancel` | POST | `run.cancel` | Cancel an in-flight run |
+
+Run states: `queued` → `running` → `succeeded` | `failed` | `cancelled` | `awaiting_approval`.
+
+A successful run reports the model's message and the accumulated usage:
+
+```json
+{
+  "status": "succeeded",
+  "token_usage": {
+    "input_tokens": 3557,
+    "output_tokens": 386,
+    "total_tokens": 3943,
+    "model_calls": 3,
+    "tool_calls": 2
+  },
+  "estimated_cost": 0,
+  "output": { "message": "**Customer: Ananya Das** …", "steps": 3 }
+}
+```
+
+`tool_calls` counts executed tool calls; an approval-gated call is not counted because it never
+executed. `estimated_cost` is `null` when the model has no pricing metadata.
+
+A run stopped by a budget fails with `EXECUTION_LIMIT_EXCEEDED` **and reports the work it did**:
+
+```json
+{
+  "status": "failed",
+  "error_code": "EXECUTION_LIMIT_EXCEEDED",
+  "error_summary": "The run reached its tool-call budget.",
+  "output": {
+    "message": null,
+    "steps": 3,
+    "stopped_because": "The run reached its tool-call budget.",
+    "completed_actions": [
+      { "tool": "search_deals", "risk_level": "low", "arguments": { … }, "output": { … } }
+    ]
+  }
+}
+```
+
+An identical tool call repeated inside one run is executed once; the second occurrence emits a
+`tool.cached` event and reuses the recorded result, so a model cannot duplicate a side effect.
+
+### 7.5 Synthetic demonstration data — `/api/v1/workspaces/{workspace_id}/demo-data`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `GET` | GET | `workspace.read` | Report whether the demo dataset is seeded and its row counts |
+| `POST` | POST | `workspace.update` | Seed the fictional CRM dataset (7 customers, 12 deals, 5 companies, 5 contacts) |
+
+The dataset is fictional, carries `is_demo = true` and is only created by this explicit, audited
+action. It is never injected into a real workspace implicitly.
 
 ---
 
-## 8. Not implemented yet
+## 8. Permission matrix (M2 additions)
 
-`/agents`, `/workflows`, `/runs`, `/approvals`, `/evaluations`, `/models`, `/tools`,
-`/knowledge`, `/schedules`, `/analytics` — specified in `AGENTS.md` §25, delivered with milestones
-M2–M8. They are intentionally absent rather than returning placeholder successes.
+| Endpoint | Required permission | Roles |
+|---|---|---|
+| `GET/POST /agents`, `GET /agents/{id}` | `agent.read` / `agent.write` | viewer+ / developer+ |
+| `POST /agents/{id}/publish|rollback|duplicate|archive`, `PATCH|DELETE /agents/{id}` | `agent.write` | developer+ |
+| `POST /agents/{id}/run`, `POST /runs`, `POST /runs/{id}/cancel` | `run.execute` / `run.cancel` | operator+ |
+| `GET /runs`, `GET /runs/{id}`, events, trace | `run.read` | viewer+ |
+| `GET /models/providers`, `GET /models` | `provider.read` | viewer+ |
+| `POST|PATCH|DELETE /models…`, `POST /models/providers/{id}/test` | `provider.write` | developer+ |
+| `GET /tools` | `tool.read` | viewer+ |
+| `POST /workspaces/{id}/demo-data` | `workspace.update` | admin+ |
+
+---
+
+## 9. Error codes used in M2
+
+`VALIDATION_ERROR`, `AUTHENTICATION_REQUIRED`, `PERMISSION_DENIED`, `RESOURCE_NOT_FOUND`,
+`CONFLICT`, `RATE_LIMITED`, `POLICY_VIOLATION`, `INTERNAL_ERROR`, plus the execution codes
+`PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `INVALID_TOOL_ARGUMENTS`, `TOOL_EXECUTION_FAILED`,
+`EXECUTION_LIMIT_EXCEEDED`, `RUN_CANCELLED` and `APPROVAL_REQUIRED`.
+
+---
+
+## 10. Not implemented yet
+
+`/workflows`, `/approvals`, `/evaluations`, `/knowledge`, `/schedules`, `/analytics`, `/api-keys` —
+specified in `AGENTS.md` §25, delivered with milestones M3–M8. They are intentionally absent rather
+than returning placeholder successes.

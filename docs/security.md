@@ -198,7 +198,9 @@ driver messages are never echoed to the client.
 - **Application logs** are structured JSON with request id, route, status and duration; secrets and
   payload bodies are excluded.
 - **Audit events** are append-only rows in `app.audit_events` for security-relevant actions:
-  workspace creation/update/deletion, membership changes, role changes, API key lifecycle.
+  workspace creation/update/deletion, membership changes, role changes, API key lifecycle, provider
+  and model configuration changes, connection tests, agent publication, run outcomes and the
+  explicit demo-data seed.
 - Audit rows are written with the acting profile and workspace; admins can read them through the
   API. There is no update or delete policy.
 
@@ -207,13 +209,47 @@ provider configuration changes, emergency pause.
 
 ---
 
-## 9. Not yet implemented (honest list)
+## 9. Tool execution safety (M2)
+
+The runtime is the security boundary for tools; the model is not.
+
+| Rule | Enforcement |
+|---|---|
+| Only registered tools run | `app/tools/executor.py` resolves the name in the server-side registry; an unknown name is `INVALID_TOOL_ARGUMENTS` |
+| Arguments are validated strictly | Each tool has a Pydantic input model with `extra="forbid"`; unexpected fields are rejected before execution |
+| Permissions are checked server-side | The executor compares the tool's required permissions with the caller's workspace role, never with anything the model produced |
+| Risk is classified, not guessed | `low` / `medium` / `high` per tool; a high-risk tool that changes a business record pauses the run for approval and does **not** execute |
+| Results are bounded and sanitized | Tool output is size-capped and truncated before it is persisted or sent back to the model |
+| Repeats do not repeat side effects | An identical call inside one run is executed once; the repeat emits `tool.cached` and reuses the recorded result |
+| Work is bounded | Step, tool-call, wall-clock, token and cost budgets raise `EXECUTION_LIMIT_EXCEEDED`; the run then reports the actions it completed |
+| The model cannot widen its own scope | Tools are bound to the published version snapshot; the run's tool set is fixed before the first model call |
+
+The model, the tool description and the retrieved content are all untrusted input. Tool results are
+fed back to the model as data, never as instructions, and the system prompt is the only
+higher-priority configuration.
+
+---
+
+## 10. Provider credentials (M2)
+
+- A provider row stores `secret_reference` — the **name** of a server-side environment variable —
+  and never the credential. The API never accepts or returns a credential value.
+- The value is resolved from the process environment at call time, so rotating the key is an
+  environment change, not a database migration.
+- `POST /models/providers/{id}/test` reports a missing variable by name
+  (`AGENTOPS_LLM_API_KEY is not set`) and never echoes any part of the value.
+- Connection diagnostics, run events and trace spans carry the provider type, model name and
+  status — never headers, tokens or response bodies that could contain a credential.
+- The browser bundle scan fails the build if a server-side variable's value appears in the bundle.
+
+---
+
+## 11. Not yet implemented (honest list)
 
 | Control | Milestone |
-|---|---|
-| Tool allowlists, argument validation, risk policy | M2/M3 |
-| Human approvals bound to a canonical argument hash | M3 |
-| Execution budgets, step/time caps, cancellation | M3 |
+|---|---|---|
+| Human approvals bound to a canonical argument hash | M3 (the runtime pauses and records the hash; the decision endpoints land in M3) |
+| Tool allowlists, per-agent rate limits, workspace quotas, emergency pause | M3 |
 | SSRF-safe generic HTTP connector | M7 |
 | Upload validation, private buckets, signed URLs | M6 |
 | API key authentication (schema exists, handshake not wired) | M8/P1 |

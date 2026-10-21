@@ -110,6 +110,13 @@ supabase db reset
 
 The CLI records applied versions in `supabase_migrations.schema_migrations`.
 
+Applied migrations to date:
+
+| Migration | Contents |
+|---|---|
+| `20261021120000_initial_identity_schema.sql` | profiles, local credentials, workspaces, memberships, preferences, API keys, audit events + RLS |
+| `20261021130000_agents_providers_tools_runtime.sql` | model providers and models, agents and immutable versions, tool definitions and bindings, synthetic CRM tables, agent runs, run events, trace spans, follow-up drafts + RLS |
+
 ---
 
 ## 5. Authentication
@@ -205,6 +212,7 @@ with `SELECT` granted on `app.local_credentials` still sees zero rows because no
 | `SUPABASE_DB_PASSWORD` | **server only** | CLI/CI migrations |
 | `SUPABASE_DB_URL` / `SUPABASE_POOLER_URL` | **server only** | direct / pooled connection strings |
 | `SUPABASE_ACCESS_TOKEN` | **CI only** | scoped personal access token |
+| `OPENROUTER_API_KEY` | **server only** | example provider credential; referenced by name through a provider row's `secret_reference`, never stored in the database |
 
 Rules:
 
@@ -214,6 +222,11 @@ Rules:
   appears in `dist/`. (Bare prefixes are allowed: `supabase-js` mentions them in key-format checks.)
 - Logs never contain tokens, passwords or connection strings. `auth.token_rejected` records a
   reason, not the token.
+- The API loads `.env` into the process environment at startup (`python-dotenv`), so a local
+  credential referenced by `secret_reference` resolves the same way as a real environment variable.
+  Real environment variables always win, and the file is ignored in production.
+- A provider row stores only the **name** of the environment variable. Rotating a provider key is
+  an environment change; no database row and no migration is involved.
 
 ### 7.1 Key rotation
 
@@ -270,6 +283,18 @@ through the UI. A confirmed test identity was bootstrapped with SQL (`auth.users
 grant. The resulting token was issued and signed by Supabase — no token was fabricated — and the
 API verified it via JWKS. The identity was deleted after the test. This is an administrative test
 bootstrap, not a product code path: the application never writes to `auth.*`.
+
+### 8.1 M2 verification (2026-10-21)
+
+| Check | Result |
+|---|---|
+| M2 migration applied | `20261021130000_agents_providers_tools_runtime.sql` applied to the hosted project and to the local test database |
+| Tables | 13 additional tables in `app` (providers, models, agents, versions, tools, bindings, 4 CRM tables, runs, events, spans, drafts), RLS enabled on all |
+| Published versions | `UPDATE` on `app.agent_versions` is rejected by trigger; a run's configuration stays interpretable |
+| Runs and traces | `app.agent_runs`, `app.run_events` (monotonic `sequence_number`) and `app.trace_spans` persisted for the deterministic and the hosted-model runs |
+| RLS regression | `supabase/tests/rls_policies.sql` passes on the hosted project with the M2 tables present |
+| Provider credential | Stored only as the environment-variable name `OPENROUTER_API_KEY`; the value never reached the database, an API response, the logs or the browser bundle |
+| Browser end-to-end | Workspace → provider → model → agent → publish → run → trace, exercised in a real browser against the hosted project |
 
 ---
 

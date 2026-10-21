@@ -1,7 +1,8 @@
 # AgentOps — Database Schema
 
-**Authority:** [`supabase/migrations/20261021120000_initial_identity_schema.sql`](../supabase/migrations/20261021120000_initial_identity_schema.sql).
-This document describes the current schema; if the two disagree, the migration wins.
+**Authority:** [`supabase/migrations/20261021120000_initial_identity_schema.sql`](../supabase/migrations/20261021120000_initial_identity_schema.sql)
+and [`supabase/migrations/20261021130000_agents_providers_tools_runtime.sql`](../supabase/migrations/20261021130000_agents_providers_tools_runtime.sql).
+These documents describe the current schema; if the two disagree, the migration wins.
 
 **Database:** Supabase Postgres (PostgreSQL 17). Domain objects live in the `app` schema; privileged
 helpers live in `app_private`. `auth`, `storage` and `extensions` belong to Supabase.
@@ -34,6 +35,15 @@ app.workspaces ◀───────────┘
    └──▶ app.workspace_members (N)
 
 app.profiles ──1:1──▶ app.local_credentials   (development only)
+
+app.workspaces ──1:N──▶ app.model_providers ──1:N──▶ app.model_configs
+app.workspaces ──1:N──▶ app.agents ──1:N──▶ app.agent_versions   (immutable snapshots)
+app.workspaces ──1:N──▶ app.tool_definitions
+app.agent_versions ──1:N──▶ app.agent_tools ──N:1──▶ app.tool_definitions
+app.agents ──1:N──▶ app.agent_runs ──1:N──▶ app.run_events
+                                        └──1:N──▶ app.trace_spans
+app.workspaces ──1:N──▶ app.crm_companies / crm_customers / crm_deals / crm_contacts
+app.crm_customers ──1:N──▶ app.followup_drafts
 ```
 
 - `app.profiles.id` **is** the Supabase Auth subject (`auth.users.id`); a deleted identity cascades
@@ -162,6 +172,29 @@ Indexes: `(workspace_id, created_at desc)`, `(action)`.
 Only a `SELECT` policy exists. There is no `UPDATE`/`DELETE` policy, so audit rows cannot be
 rewritten through the Data API.
 
+### 2.8 M2 tables — agents, providers, tools, CRM and execution
+
+Added by `20261021130000_agents_providers_tools_runtime.sql`. Every table enables RLS and carries
+workspace-scoped policies that mirror the API's authorization rules.
+
+| Table | Purpose | Key columns | Notes |
+|---|---|---|---|
+| `app.model_providers` | Provider configuration | `provider_type`, `display_name`, `base_url`, `secret_reference`, `configuration`, `status`, `last_health_check_at`, `last_health_error` | `secret_reference` is an environment-variable **name**; no credential value is ever stored |
+| `app.model_configs` | A model on a provider | `provider_id`, `model_name`, `capabilities` (jsonb), `default_parameters` (jsonb), `pricing` (jsonb), `enabled`, `is_default` | `capabilities` is tri-state: `null` means unknown, never "supported" |
+| `app.agents` | An agent draft | `name`, `description`, `status`, `draft_configuration` (jsonb), `current_published_version_id`, `created_by` | The draft is editable; the published version is not |
+| `app.agent_versions` | Immutable published snapshot | `agent_id`, `version_number`, `configuration` (jsonb), `configuration_hash`, `change_summary`, `created_by` | A trigger rejects `UPDATE`, so a run stays interpretable |
+| `app.tool_definitions` | Server-side tool registry | `name`, `version`, `description`, `input_schema`, `output_schema`, `risk_level`, `required_permissions`, `timeout_seconds`, `requires_approval`, `enabled` | `workspace_id` is null for global built-ins |
+| `app.agent_tools` | Tool binding for an agent version | `agent_version_id`, `tool_definition_id`, `configuration` | The tool set is fixed when the version is published |
+| `app.crm_companies`, `app.crm_customers`, `app.crm_deals`, `app.crm_contacts` | Synthetic CRM dataset | names, amounts, stages, timestamps, `is_demo` | Fictional data; seeded only by the explicit, audited demo-data action |
+| `app.agent_runs` | One execution | `agent_version_id`, `initiated_by`, `status`, `input`, `output`, `token_usage`, `estimated_cost`, `error_code`, `error_summary`, `replay_of_run_id` | `token_usage` includes `model_calls` and `tool_calls`; `estimated_cost` is null when pricing is unknown |
+| `app.run_events` | Ordered execution events | `run_id`, `sequence_number`, `event_type`, `event_status`, `payload` (jsonb), `occurred_at` | `sequence_number` is the recovery cursor; unique per run |
+| `app.trace_spans` | Hierarchical spans | `run_id`, `parent_span_id`, `span_type`, `name`, `status`, `started_at`, `ended_at`, `duration_ms`, `attributes` | `span_type` is `agent_run`, `model_call` or `tool_call` |
+| `app.followup_drafts` | Draft follow-up messages | `customer_id`, `deal_id`, `subject`, `body`, `status` | Internal and reversible; no message is ever sent |
+
+Event types recorded by the runtime: `run.started`, `model.request`, `model.response`,
+`tool.request`, `tool.cached`, `tool.result`, `tool.error`, `approval.required`, `run.succeeded`,
+`run.failed`, `run.cancelled`, `run.awaiting_approval`.
+
 ---
 
 ## 3. Functions and triggers
@@ -233,6 +266,8 @@ It asserts:
 - Ownership cannot be reassigned by an admin update.
 - `authenticated` has no table grants in `app`.
 - An `authenticated` session granted `SELECT` on `local_credentials` still sees zero rows.
+- The M2 tables (providers, models, agents, versions, tools, CRM, runs, events, spans) enforce the
+  same workspace-membership predicate, and the published-version trigger refuses an `UPDATE`.
 
 Backend test: `backend/tests/integration/test_rls_policies.py` loads the migration into a scratch
 database and executes the SQL assertions. It runs in the normal `pytest` suite.

@@ -61,12 +61,20 @@ DATABASE_URL=postgresql+psycopg://postgres.<project-ref>:<db-password>@aws-0-<re
 TEST_DATABASE_URL=postgresql+psycopg://agentops@127.0.0.1:55432/agentops_test
 
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+
+# Optional: a provider credential referenced by a provider row's secret_reference.
+# The value is never stored in the database; the API reads the variable name only.
+OPENROUTER_API_KEY=
 ```
 
 The direct host `db.<project-ref>.supabase.co` is **IPv6-only** on this project; do not use it from
 the application. Migrations use the session pooler on the same host at port **5432**.
 
 > `backend/.env` is git-ignored. `.env.example` lists names only.
+
+The API loads `backend/.env` into the process environment at startup (`python-dotenv`), so a
+credential referenced by `secret_reference` resolves like any other environment variable. Real
+environment variables always win, and the file is simply absent in a container deployment.
 
 ### 2.3 Apply the schema
 

@@ -563,38 +563,56 @@ pass. **Reached and verified live.**
 
 ---
 
-### M2 — Agents, providers, tools, runtime (spec Phase 2)
+### M2 — Agents, providers, tools, runtime (spec Phase 2) — *complete, tested*
 
 Backend
-- [ ] Provider interface: `Provider` protocol, `ModelRequest/Response/ToolCall/Usage/ProviderError`,
+- [x] Provider interface: `Provider` protocol, `ModelRequest/Response/ToolCall/Usage/ProviderError`,
       capability metadata (`supports_tools`, `supports_structured_output`, `supports_streaming`,
       `context_window`)
-- [ ] Adapters: `ollama`, `openai_compatible`, `anthropic`, `simulation` (deterministic, labelled)
-- [ ] Provider health check + `POST /providers/{id}/test`; secrets stored by reference, masked out
-- [ ] `app.model_providers` + `app.model_configs` persistence and CRUD
-- [ ] Tool registry: `ToolDefinition` (id, name, version, schemas, risk, permissions, timeout,
+- [x] Adapters: `ollama`, `openai_compatible`, `anthropic`, `simulation` (deterministic, labelled)
+- [x] Provider health check + `POST /providers/{id}/test`; secrets stored by reference, masked out
+- [x] `app.model_providers` + `app.model_configs` persistence and CRUD
+- [x] Tool registry: `ToolDefinition` (id, name, version, schemas, risk, permissions, timeout,
       retry policy, idempotency, requires_approval, enabled, audit metadata) + server-side resolution
-- [ ] 9 built-in CRM tools over synthetic data: `search_customers`, `search_deals`,
+- [x] 9 built-in CRM tools over synthetic data: `search_customers`, `search_deals`,
       `get_customer_summary`, `get_deal_details`, `calculate_metrics`, `search_knowledge`,
       `create_followup_draft`, `generate_sales_report`, `mark_deal_contacted`
-- [ ] Synthetic CRM dataset (INR, fictional names) as a deterministic seed module
-- [ ] Agent CRUD, configuration schema, immutable published versions, drafts, duplication, rollback
-- [ ] Runtime engine: the 20-step lifecycle with per-step trace emission, step/time/token/cost
+- [x] Synthetic CRM dataset (INR, fictional names) seeded only by an explicit audited action
+- [x] Agent CRUD, configuration schema, immutable published versions, drafts, duplication, rollback
+- [x] Runtime engine: the 20-step lifecycle with per-step trace emission, step/time/token/cost
       budgets, retries (safe ops only), cancellation, terminal-state persistence
-- [ ] `app.agent_runs`, `app.run_events`, `app.trace_spans`; `/runs/{id}/events`; Realtime broadcast
-- [ ] `POST /agents/{id}/test` playground endpoint (real backend runtime)
+- [x] `app.agent_runs`, `app.run_events`, `app.trace_spans`; `/runs/{id}/events`; cursor recovery
+- [x] `POST /agents/{id}/run` playground endpoint against the real backend runtime
+- [x] Duplicate-call guard: an identical call inside one run reuses the recorded result
+      (`tool.cached` event) instead of repeating a possible side effect
+- [x] Bounded failures report their work: a run stopped by a budget persists
+      `output.completed_actions` and `output.stopped_because` instead of an empty result
+- [x] Tri-state capability metadata: unknown is never reported as supported
 
 Frontend
-- [ ] Agent list + create/edit (RHF+Zod) + template gallery (8 functional templates)
-- [ ] Agent Studio: configuration panel, capability-aware model/parameter selector, tool picker
-- [ ] Version history, publish, rollback, duplicate
-- [ ] Playground: chat input, structured input editor, streaming output, tool events, usage/cost,
-      trace link, cancel, error + retry
-- [ ] Provider configuration screens (connect, test, model list, default model)
+- [x] Agent list + create (template gallery of 8 functional templates) + configuration in Studio
+- [x] Agent Studio: configuration panel, model/parameter selector, tool picker, limits
+- [x] Version history, publish, rollback, duplicate, archive
+- [x] Playground: request input, version selector, run/cancel, tool events, usage/cost, trace link,
+      labelled simulation notice, partial results for a bounded failure
+- [x] Provider configuration screens (connect, test, model list, capability + pricing metadata)
+- [x] Runs & traces: run list, run detail with outcome, events, trace spans, completed actions
+- [x] Tools & integrations: registry view and the explicit audited demo-data action
 
 **Exit:** a real agent calls a registered tool against synthetic CRM data and the run is persisted
-with a full trace.
-**Verify:** integration test `test_agent_runtime_end_to_end` + provider adapter unit tests.
+with a full trace. — *Met twice: once through the labelled deterministic provider and once through a
+hosted cloud model (`dots-studio/dots-3-note-preview:free` on OpenRouter).*
+**Verify:** `backend/tests/integration/test_agents_api.py` (authoritative flow),
+`backend/tests/unit/test_provider_adapters.py`, `backend/tests/unit/test_tool_executor.py`,
+`backend/tests/unit/test_simulation_provider.py`; 159 backend tests green.
+
+**M2 findings carried forward**
+- The free preview model loops on tool calls; the runtime stopped it at the tool-call budget with
+  `EXECUTION_LIMIT_EXCEEDED` and reported the eight completed actions. This is the platform behaving
+  correctly, not a defect, and it is the honest reason the same prompt succeeds on the deterministic
+  provider and fails on a weak hosted model.
+- Approval decisions, streaming output, the workflow canvas and the approval queue remain M3/M4.
+- `search_knowledge` returns an explicit empty result with a note until the Knowledge Hub lands (M6).
 
 ---
 

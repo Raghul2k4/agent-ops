@@ -69,27 +69,33 @@ module and emits a persisted `run_events` row plus a `trace_spans` entry.
 
 | # | Step | Module | Failure mode |
 |---|---|---|---|
-| 1–3 | accept, authenticate, resolve workspace/resource | `api/deps.py`, `services/runs.py` | `AUTHENTICATION_REQUIRED`, `RESOURCE_NOT_FOUND` |
+| 1–3 | accept, authenticate, resolve workspace/resource | `api/v1/deps.py`, `services/runs.py` | `AUTHENTICATION_REQUIRED`, `RESOURCE_NOT_FOUND` |
 | 4 | authorization | `core/permissions.py` | `PERMISSION_DENIED` |
 | 5 | validate request + configuration | `schemas/agents.py` | `VALIDATION_ERROR` |
 | 6 | create persistent run record | `services/runs.py` | — |
 | 7 | load immutable agent version | `services/agents.py` | `RESOURCE_NOT_FOUND` |
-| 8 | init limits + trace context | `agents/runtime/budget.py` | `EXECUTION_LIMIT_EXCEEDED` |
-| 9 | invoke model | `providers/*` | `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT` |
-| 10–13 | validate tool call, resolve, validate args, enforce risk policy | `tools/registry.py`, `policies/` | `INVALID_TOOL_ARGUMENTS`, `POLICY_VIOLATION` |
-| 14–15 | pause for approval, execute permitted tool | `approvals/`, `tools/executor.py` | `APPROVAL_REQUIRED`, `APPROVAL_EXPIRED` |
-| 16 | persist sanitized result + trace event | `repositories/runs.py` | — |
-| 17 | continue within limits | `agents/runtime/loop.py` | `EXECUTION_LIMIT_EXCEEDED` |
-| 18–20 | final result / controlled failure, persist terminal status, emit completion | `services/runs.py` | `INTERNAL_ERROR` |
+| 8 | init limits + trace context | `runtime/engine.py` (`Usage`, `_check_budget`) | `EXECUTION_LIMIT_EXCEEDED` |
+| 9 | invoke model | `providers/*` via `providers/factory.py` | `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT` |
+| 10–13 | validate tool call, resolve, validate args, enforce risk policy | `tools/executor.py`, `tools/base.py` | `INVALID_TOOL_ARGUMENTS`, `POLICY_VIOLATION` |
+| 14–15 | pause for approval, execute permitted tool | `tools/executor.py` (approval gate) | `APPROVAL_REQUIRED`, `APPROVAL_EXPIRED` |
+| 16 | persist sanitized result + trace event | `runtime/engine.py` (`_emit`) | — |
+| 17 | continue within limits | `runtime/engine.py` (`RunLedger`) | `EXECUTION_LIMIT_EXCEEDED` |
+| 18–20 | final result / controlled failure, persist terminal status, emit completion | `runtime/engine.py` (`_finalize`) | `INTERNAL_ERROR` |
 
 **Tool-call trust model:** a model may only *propose* a tool call. The runtime resolves the tool
 from the server-side registry, validates arguments against the tool's strict schema
-(`extra="forbid"`), checks the agent's tool allowlist and the workspace role's permissions,
-applies risk policy (approval, rate limit, idempotency), and only then executes.
+(`extra="forbid"`), checks the agent's tool set and the workspace role's permissions, applies risk
+policy (approval, timeout, idempotency) and only then executes.
 
-**Budgets:** `max_steps`, `max_tool_calls`, `max_wall_clock_ms`, `max_tokens`,
+**Duplicate calls:** the run keeps a `RunLedger` of executed calls keyed by a hash of
+`(tool, arguments)`. An identical call inside the same run is **not** executed again: the recorded
+result is reused and a `tool.cached` event is emitted. A model therefore cannot duplicate a side
+effect by repeating itself.
+
+**Budgets:** `max_steps`, `max_tool_calls`, `max_wall_clock_seconds`, `max_total_tokens`,
 `max_cost_usd`. Exceeding any of them ends the run with `EXECUTION_LIMIT_EXCEEDED` — it never
-silently truncates.
+silently truncates, and the failure output carries `stopped_because` plus the `completed_actions`
+the run did perform.
 
 **Retries:** only for idempotent operations and only for retryable error classes
 (`PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`) with exponential backoff + jitter.
@@ -107,15 +113,17 @@ class Provider(Protocol):
     def estimate_cost(self, usage: Usage) -> CostEstimate | None: ...
 ```
 
-- Typed contracts: `ModelRequest`, `ModelResponse`, `ToolCall`, `Usage`, `ProviderError`,
-  `ModelCapability`.
-- `ModelCapability` declares `supports_tools`, `supports_structured_output`,
-  `supports_streaming`, `context_window`, `pricing` — the UI hides unsupported settings instead
-  of pretending they work.
+- Typed contracts: `ModelRequest`, `ModelResponse`, `ModelToolCall`, `ModelUsage`, `ProviderError`,
+  `ProviderCapabilities`.
+- Capability metadata is tri-state: `true`, `false` or `null` for **unknown**. The platform never
+  asserts a capability it has not confirmed, and the UI shows an unknown capability as unknown
+  instead of assuming support.
 - Adapters: `ollama` (local), `openai_compatible` (OpenAI, Groq, Together, vLLM, OpenRouter),
-  `anthropic`, `simulation` (deterministic, offline, always labelled `SIMULATED`).
-- Pricing is an external, versioned table; when pricing is unknown the API returns
-  `estimated_cost: null` + `cost_status: "unavailable"` — never a fabricated number.
+  `anthropic`, `simulation` (deterministic, offline, always labelled `[SIMULATED]`).
+- Credentials are referenced by environment-variable name (`secret_reference`) and resolved from
+  the process environment at call time; they are never stored in the database.
+- Pricing is external metadata attached to a model registration; when pricing is unknown the run
+  reports `estimated_cost: null` and the UI says "cost unavailable" — never a fabricated number.
 
 ---
 
