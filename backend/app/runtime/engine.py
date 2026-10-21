@@ -3,9 +3,12 @@
 One run walks a bounded model/tool loop:
 
 * configuration comes from the immutable ``agent_versions`` snapshot
+* the workspace policy decides what may run, what needs approval and how fast
 * budgets (steps, tool calls, wall clock, tokens, cost) are enforced here
 * every model call and tool call produces a persisted event and trace span
 * model-proposed tool names and arguments are validated by the tool executor
+* a call that needs a human decision pauses the run and stores a checkpoint
+  so the run can continue after the decision
 * cancellation is checked between every step and interrupts an in-flight call
 
 Runs execute as background asyncio tasks in the API process for this milestone.
@@ -30,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import (
     AppError,
+    ApprovalMismatch,
     ExecutionLimitExceeded,
     InternalError,
     PolicyViolation,
@@ -43,12 +47,14 @@ from app.core.permissions import Permission, permissions_for_role
 from app.core.security import hash_payload
 from app.db.session import get_session_factory
 from app.models.agents import AgentVersion
+from app.models.policies import ApprovalRequest, RunCheckpoint
 from app.models.providers import ModelConfig, ModelProvider
 from app.models.runs import AgentRun, RunEvent, TraceSpan
 from app.providers.base import (
     ChatMessage,
     ModelRequest,
     ModelResponse,
+    ModelToolCall,
     ModelUsage,
     Provider,
     ProviderError,
@@ -58,13 +64,33 @@ from app.providers.factory import build_provider
 from app.runtime import cancellation
 from app.schemas.agents import AgentConfiguration
 from app.services import agents as agent_service
+from app.services import approvals as approval_service
 from app.services import audit as audit_service
+from app.services import policies as policy_service
 from app.services import tools as tool_service
-from app.tools import ToolApprovalRequiredError, ToolContext, execute_tool, provider_tool_specs
+from app.services.policies import EffectivePolicy
+from app.tools import (
+    PreparedToolCall,
+    ToolContext,
+    execute_prepared,
+    prepare_tool_call,
+    provider_tool_specs,
+)
 
 logger = get_logger(__name__)
 
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
+
+#: Risk levels that a replay always re-checks with a human before running.
+REPLAY_APPROVAL_RISK_LEVELS = frozenset({"high", "critical"})
+
+
+class ApprovalPauseError(Exception):
+    """Internal signal: this call needs a human decision before it may run."""
+
+    def __init__(self, prepared: PreparedToolCall) -> None:
+        super().__init__(prepared.spec.name)
+        self.prepared = prepared
 
 
 @dataclass(slots=True)
@@ -108,6 +134,22 @@ class Usage:
             "tool_calls": self.tool_calls,
         }
 
+    def counters(self) -> dict[str, int]:
+        """The counters that must survive a pause for approval."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+        }
+
+    def restore(self, counters: dict[str, int]) -> None:
+        """Restore counters saved before a pause."""
+        self.input_tokens = int(counters.get("input_tokens", 0))
+        self.output_tokens = int(counters.get("output_tokens", 0))
+        self.model_calls = int(counters.get("model_calls", 0))
+        self.tool_calls = int(counters.get("tool_calls", 0))
+
 
 @dataclass(slots=True)
 class Outcome:
@@ -120,16 +162,66 @@ class Outcome:
 
 @dataclass(slots=True)
 class RunLedger:
-    """State of one run that must survive a bounded failure.
+    """State of one run that must survive a bounded failure or a pause.
 
     ``executed_calls`` prevents an identical call from repeating a side
     effect, and ``completed_actions`` lets a run that hits a budget report
     what it actually did instead of an empty result.
     """
 
-    executed_calls: dict[str, Any] = field(default_factory=dict)
+    executed_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     completed_actions: list[dict[str, Any]] = field(default_factory=list)
     step: int = 0
+    tool_calls_used: int = 0
+
+
+@dataclass(slots=True)
+class RunState:
+    """The conversation snapshot that lets a paused run continue.
+
+    A run that stops for approval keeps everything the runtime needs to pick
+    up exactly where it left off: the messages, the counters and the calls
+    that were proposed but not yet executed.
+    """
+
+    messages: list[ChatMessage] = field(default_factory=list)
+    step: int = 0
+    tool_calls_used: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    executed_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
+    completed_actions: list[dict[str, Any]] = field(default_factory=list)
+    pending_calls: list[dict[str, Any]] = field(default_factory=list)
+    pending_index: int = 0
+    pending_hash: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        """Serialise the state for ``app.run_checkpoints``."""
+        return {
+            "messages": [message.model_dump(mode="json") for message in self.messages],
+            "step": self.step,
+            "tool_calls_used": self.tool_calls_used,
+            "usage": dict(self.usage),
+            "executed_calls": dict(self.executed_calls),
+            "completed_actions": list(self.completed_actions),
+            "pending_calls": list(self.pending_calls),
+            "pending_index": self.pending_index,
+            "pending_hash": self.pending_hash,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> RunState:
+        """Rebuild the state from a stored checkpoint."""
+        return cls(
+            messages=[ChatMessage.model_validate(item) for item in payload.get("messages", [])],
+            step=int(payload.get("step", 0)),
+            tool_calls_used=int(payload.get("tool_calls_used", 0)),
+            usage={str(key): int(value) for key, value in (payload.get("usage") or {}).items()},
+            executed_calls=dict(payload.get("executed_calls") or {}),
+            completed_actions=list(payload.get("completed_actions") or []),
+            pending_calls=list(payload.get("pending_calls") or []),
+            pending_index=int(payload.get("pending_index", 0)),
+            pending_hash=payload.get("pending_hash"),
+        )
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -139,7 +231,7 @@ def _decimal(value: Any) -> Decimal | None:
         parsed = Decimal(str(value))
     except Exception:
         return None
-    return parsed if parsed >= 0 else None
+    return parsed
 
 
 def _now() -> datetime:
@@ -308,6 +400,286 @@ async def _chat_with_cancel(
             await cancelled
 
 
+async def _save_checkpoint(
+    session: AsyncSession, *, run: AgentRun, state: RunState
+) -> RunCheckpoint:
+    """Persist the state that lets a paused run continue."""
+    checkpoint = RunCheckpoint(
+        workspace_id=run.workspace_id,
+        run_id=run.id,
+        step=state.step,
+        state=state.to_payload(),
+    )
+    session.add(checkpoint)
+    await session.flush()
+    return checkpoint
+
+
+async def _load_checkpoint(session: AsyncSession, *, run: AgentRun) -> RunCheckpoint | None:
+    """Load the newest checkpoint of a run."""
+    return await session.scalar(
+        select(RunCheckpoint)
+        .where(RunCheckpoint.run_id == run.id)
+        .order_by(RunCheckpoint.step.desc())
+        .limit(1)
+    )
+
+
+async def _process_calls(
+    *,
+    session: AsyncSession,
+    run: AgentRun,
+    run_span: TraceSpan,
+    context: ToolContext,
+    messages: list[ChatMessage],
+    config: AgentConfiguration,
+    policy: EffectivePolicy,
+    calls: list[ModelToolCall],
+    start_index: int,
+    approved_hash: str | None,
+    allowed_tool_names: set[str],
+    usage: Usage,
+    ledger: RunLedger,
+    cancel_event: asyncio.Event,
+) -> Outcome | None:
+    """Execute the calls a model proposed.
+
+    Returns an ``Outcome`` when the run has to pause for approval, otherwise
+    ``None`` so the caller continues the model loop.
+    """
+    tool_call_limit = policy.tool_call_limit(config.limits.max_tool_calls)
+    replay_mode = bool(run.replay_mode)
+
+    for index in range(start_index, len(calls)):
+        call = calls[index]
+        _check_cancel(cancel_event)
+        ledger.tool_calls_used += 1
+        if ledger.tool_calls_used > tool_call_limit:
+            raise ExecutionLimitExceeded(
+                "The run reached its tool-call budget.",
+                details={"max_tool_calls": tool_call_limit},
+            )
+
+        call_key = hash_payload({"tool": call.name, "arguments": call.arguments})
+        cached = ledger.executed_calls.get(call_key)
+        if cached is not None:
+            # The identical call already ran in this run. Reuse the recorded
+            # result instead of repeating a possible side effect.
+            await _emit(
+                session,
+                run,
+                "tool.cached",
+                {
+                    "tool": call.name,
+                    "arguments": call.arguments,
+                    "note": (
+                        "Reused the result of an identical call in this run; "
+                        "the tool was not executed again."
+                    ),
+                },
+                "info",
+            )
+            messages.append(
+                ChatMessage(
+                    role="tool",
+                    content=json.dumps(cached.get("output", {}), default=str)[:16000],
+                    tool_call_id=call.id,
+                    tool_name=str(cached.get("tool_name") or call.name),
+                )
+            )
+            await session.commit()
+            continue
+
+        await _emit(
+            session,
+            run,
+            "tool.request",
+            {"tool": call.name, "arguments": call.arguments},
+            "info",
+        )
+
+        tool_span = _start_span(
+            session,
+            run,
+            span_type="tool_call",
+            name=call.name,
+            parent_span_id=run_span.id,
+            attributes={"tool": call.name, "arguments": call.arguments},
+        )
+        tool_started = time.monotonic()
+        try:
+            prepared = await prepare_tool_call(
+                context, tool_name=call.name, raw_arguments=call.arguments
+            )
+
+            if prepared.spec.name not in allowed_tool_names:
+                raise PolicyViolation(
+                    f"The tool '{prepared.spec.name}' is not part of this agent "
+                    "version's tool set.",
+                    details={
+                        "tool": prepared.spec.name,
+                        "allowed_tools": sorted(allowed_tool_names),
+                    },
+                )
+
+            if not policy.tool_is_allowed(prepared.spec.name):
+                raise PolicyViolation(
+                    f"The tool '{prepared.spec.name}' is not allowed by the workspace policy.",
+                    details={
+                        "tool": prepared.spec.name,
+                        "policy_version": policy.version,
+                    },
+                )
+            await policy_service.assert_tool_rate(
+                session, policy=policy, tool_name=prepared.spec.name
+            )
+
+            approved = approved_hash is not None and index == start_index
+            if approved and approved_hash != prepared.canonical_hash:
+                raise ApprovalMismatch(
+                    "The approved action no longer matches the proposed payload.",
+                    details={"tool": prepared.spec.name},
+                )
+
+            needs_approval = False
+            if not approved:
+                needs_approval = policy.requires_approval(prepared.spec)
+                if replay_mode and prepared.spec.risk_level in REPLAY_APPROVAL_RISK_LEVELS:
+                    # A replay never repeats an irreversible action on its own.
+                    needs_approval = True
+
+            if needs_approval:
+                raise ApprovalPauseError(prepared)
+
+            result = await execute_prepared(context, prepared=prepared)
+        except ApprovalPauseError as pause:
+            prepared = pause.prepared
+            _close_span(
+                tool_span,
+                status="cancelled",
+                duration_ms=int((time.monotonic() - tool_started) * 1000),
+            )
+            approval = await approval_service.create_approval_request(
+                session,
+                workspace_id=run.workspace_id,
+                run_id=run.id,
+                agent_version_id=run.agent_version_id,
+                tool_definition_id=prepared.spec.definition_id,
+                tool_name=prepared.spec.name,
+                risk_level=prepared.spec.risk_level,
+                arguments=prepared.arguments,
+                canonical_hash=prepared.canonical_hash,
+                policy_version=policy.version,
+                ttl_minutes=policy.approval_ttl_minutes,
+                requested_by=run.initiated_by,
+            )
+            state = RunState(
+                messages=list(messages),
+                step=ledger.step,
+                tool_calls_used=ledger.tool_calls_used,
+                usage=usage.counters(),
+                executed_calls=dict(ledger.executed_calls),
+                completed_actions=list(ledger.completed_actions),
+                pending_calls=[item.model_dump(mode="json") for item in calls],
+                pending_index=index,
+                pending_hash=prepared.canonical_hash,
+            )
+            await _save_checkpoint(session, run=run, state=state)
+            run.pending_approval_id = approval.id
+            await _emit(
+                session,
+                run,
+                "approval.required",
+                {
+                    "tool": prepared.spec.name,
+                    "risk_level": prepared.spec.risk_level,
+                    "arguments": _sanitize(prepared.arguments),
+                    "canonical_arguments_hash": prepared.canonical_hash,
+                    "tool_definition_id": str(prepared.spec.definition_id),
+                    "approval_id": str(approval.id),
+                    "expires_at": approval.expires_at.isoformat(),
+                    "policy_version": policy.version,
+                    "note": (
+                        "The action was not executed. It runs only after a reviewer "
+                        "approves this exact payload."
+                    ),
+                },
+                "warning",
+            )
+            await session.commit()
+            return Outcome(
+                status="awaiting_approval",
+                output={
+                    "pending_approval": {
+                        "id": str(approval.id),
+                        "tool": prepared.spec.name,
+                        "risk_level": prepared.spec.risk_level,
+                        "arguments": _sanitize(prepared.arguments),
+                        "canonical_arguments_hash": prepared.canonical_hash,
+                        "expires_at": approval.expires_at.isoformat(),
+                    },
+                    "message": None,
+                },
+                usage=usage,
+            )
+        except AppError as exc:
+            # The call was refused or failed. It never executed, but it is
+            # visible in the trace like any other attempted action.
+            usage.tool_calls += 1
+            _close_span(
+                tool_span,
+                status="error",
+                duration_ms=int((time.monotonic() - tool_started) * 1000),
+            )
+            await _emit(
+                session,
+                run,
+                "tool.error",
+                {"tool": call.name, "code": exc.code.value, "message": exc.message},
+                "error",
+            )
+            raise
+
+        usage.tool_calls += 1
+        tool_duration = int((time.monotonic() - tool_started) * 1000)
+        _close_span(tool_span, status="ok", duration_ms=tool_duration)
+        ledger.executed_calls[call_key] = {
+            "tool_name": result.tool_name,
+            "output": result.output,
+        }
+        ledger.completed_actions.append(
+            {
+                "tool": result.tool_name,
+                "risk_level": result.risk_level,
+                "arguments": _sanitize(result.arguments, max_string=500),
+                "output": _sanitize(result.output, max_string=2000, max_items=20),
+            }
+        )
+        await _emit(
+            session,
+            run,
+            "tool.result",
+            {
+                "tool": result.tool_name,
+                "duration_ms": result.duration_ms,
+                "risk_level": result.risk_level,
+                "output": result.output,
+            },
+        )
+        messages.append(
+            ChatMessage(
+                role="tool",
+                content=json.dumps(result.output, default=str)[:16000],
+                tool_call_id=call.id,
+                tool_name=result.tool_name,
+            )
+        )
+        # Persist the tool result and its event before the next iteration.
+        await session.commit()
+
+    return None
+
+
 async def _run_loop(
     session: AsyncSession,
     run: AgentRun,
@@ -316,6 +688,9 @@ async def _run_loop(
     started: float,
     usage: Usage,
     ledger: RunLedger,
+    state: RunState | None = None,
+    policy: EffectivePolicy | None = None,
+    approved_hash: str | None = None,
 ) -> Outcome:
     version = await session.get(AgentVersion, run.agent_version_id)
     if version is None:
@@ -335,7 +710,14 @@ async def _run_loop(
         raise PolicyViolation("The model configured for this agent no longer exists.")
     pricing = dict(model_row.pricing or {})
 
+    if policy is None:
+        policy = await policy_service.get_policy(session, workspace_id=run.workspace_id)
+
     tool_specs = await tool_service.resolve_tool_specs(session, run.workspace_id, config.tool_ids)
+    # The tool set is fixed by the published version. A model may only ask for
+    # a tool the version was granted; anything else is refused, whatever the
+    # model says and whatever a tool result told it to do.
+    allowed_tool_names = {spec.name for spec in tool_specs}
     try:
         role = await agent_service.member_role(
             session, workspace_id=run.workspace_id, profile_id=run.initiated_by
@@ -354,12 +736,21 @@ async def _run_loop(
     # Release the read transaction before the first external call.
     await session.commit()
 
-    messages: list[ChatMessage] = [
-        ChatMessage(role="system", content=config.system_prompt),
-        ChatMessage(role="user", content=str(run.input.get("message", ""))),
-    ]
+    if state is None:
+        messages: list[ChatMessage] = [
+            ChatMessage(role="system", content=config.system_prompt),
+            ChatMessage(role="user", content=str(run.input.get("message", ""))),
+        ]
+        start_step = 1
+    else:
+        messages = list(state.messages)
+        start_step = state.step + 1
+        ledger.tool_calls_used = state.tool_calls_used
+        ledger.executed_calls.update(state.executed_calls)
+        ledger.completed_actions.extend(state.completed_actions)
+        usage.restore(state.usage)
+
     tool_specs_for_model = provider_tool_specs(tool_specs)
-    tool_calls_used = 0
     context = ToolContext(
         session=session,
         workspace_id=run.workspace_id,
@@ -368,7 +759,30 @@ async def _run_loop(
         permissions=permissions,
     )
 
-    for step in range(1, config.limits.max_steps + 1):
+    # A resumed run first finishes the calls that were proposed before the
+    # pause; the approved one is executed, the rest follow the same rules.
+    if state is not None and state.pending_calls:
+        pending = [ModelToolCall.model_validate(item) for item in state.pending_calls]
+        outcome = await _process_calls(
+            session=session,
+            run=run,
+            run_span=run_span,
+            context=context,
+            messages=messages,
+            config=config,
+            policy=policy,
+            calls=pending,
+            start_index=state.pending_index,
+            approved_hash=approved_hash,
+            allowed_tool_names=allowed_tool_names,
+            usage=usage,
+            ledger=ledger,
+            cancel_event=cancel_event,
+        )
+        if outcome is not None:
+            return outcome
+
+    for step in range(start_step, config.limits.max_steps + 1):
         ledger.step = step
         _check_cancel(cancel_event)
         elapsed = time.monotonic() - started
@@ -477,153 +891,24 @@ async def _run_loop(
             )
         )
 
-        for call in response.tool_calls:
-            _check_cancel(cancel_event)
-            tool_calls_used += 1
-            if tool_calls_used > config.limits.max_tool_calls:
-                raise ExecutionLimitExceeded(
-                    "The run reached its tool-call budget.",
-                    details={"max_tool_calls": config.limits.max_tool_calls},
-                )
-
-            call_key = hash_payload({"tool": call.name, "arguments": call.arguments})
-            cached = ledger.executed_calls.get(call_key)
-            if cached is not None:
-                # The identical call already ran in this run. Reuse the recorded
-                # result instead of repeating a possible side effect.
-                await _emit(
-                    session,
-                    run,
-                    "tool.cached",
-                    {
-                        "tool": call.name,
-                        "arguments": call.arguments,
-                        "note": (
-                            "Reused the result of an identical call in this run; "
-                            "the tool was not executed again."
-                        ),
-                    },
-                    "info",
-                )
-                messages.append(
-                    ChatMessage(
-                        role="tool",
-                        content=json.dumps(cached.output, default=str)[:16000],
-                        tool_call_id=call.id,
-                        tool_name=cached.tool_name,
-                    )
-                )
-                await session.commit()
-                continue
-
-            await _emit(
-                session,
-                run,
-                "tool.request",
-                {"tool": call.name, "arguments": call.arguments},
-                "info",
-            )
-
-            tool_span = _start_span(
-                session,
-                run,
-                span_type="tool_call",
-                name=call.name,
-                parent_span_id=run_span.id,
-                attributes={"tool": call.name, "arguments": call.arguments},
-            )
-            tool_started = time.monotonic()
-            try:
-                result = await execute_tool(
-                    context, tool_name=call.name, raw_arguments=call.arguments
-                )
-            except ToolApprovalRequiredError as exc:
-                _close_span(
-                    tool_span,
-                    status="cancelled",
-                    duration_ms=int((time.monotonic() - tool_started) * 1000),
-                )
-                await _emit(
-                    session,
-                    run,
-                    "approval.required",
-                    {
-                        "tool": exc.tool_name,
-                        "risk_level": exc.risk_level,
-                        "arguments": exc.arguments,
-                        "canonical_arguments_hash": exc.canonical_hash,
-                        "tool_definition_id": str(exc.tool_definition_id),
-                        "note": (
-                            "The action was not executed. Approvals are implemented in the "
-                            "next milestone."
-                        ),
-                    },
-                    "warning",
-                )
-                return Outcome(
-                    status="awaiting_approval",
-                    output={
-                        "pending_approval": {
-                            "tool": exc.tool_name,
-                            "risk_level": exc.risk_level,
-                            "arguments": _sanitize(exc.arguments),
-                            "canonical_arguments_hash": exc.canonical_hash,
-                        },
-                        "message": None,
-                    },
-                    usage=usage,
-                )
-            except AppError as exc:
-                # The executor was invoked but rejected or failed the call. It
-                # still counts as an attempted tool execution for reporting.
-                usage.tool_calls += 1
-                _close_span(
-                    tool_span,
-                    status="error",
-                    duration_ms=int((time.monotonic() - tool_started) * 1000),
-                )
-                await _emit(
-                    session,
-                    run,
-                    "tool.error",
-                    {"tool": call.name, "code": exc.code.value, "message": exc.message},
-                    "error",
-                )
-                raise
-
-            usage.tool_calls += 1
-            tool_duration = int((time.monotonic() - tool_started) * 1000)
-            _close_span(tool_span, status="ok", duration_ms=tool_duration)
-            ledger.executed_calls[call_key] = result
-            ledger.completed_actions.append(
-                {
-                    "tool": result.tool_name,
-                    "risk_level": result.risk_level,
-                    "arguments": _sanitize(result.arguments, max_string=500),
-                    "output": _sanitize(result.output, max_string=2000, max_items=20),
-                }
-            )
-            await _emit(
-                session,
-                run,
-                "tool.result",
-                {
-                    "tool": result.tool_name,
-                    "duration_ms": result.duration_ms,
-                    "risk_level": result.risk_level,
-                    "output": result.output,
-                },
-            )
-            messages.append(
-                ChatMessage(
-                    role="tool",
-                    content=json.dumps(result.output, default=str)[:16000],
-                    tool_call_id=call.id,
-                    tool_name=result.tool_name,
-                )
-            )
-            # Persist the tool result and its event before the next iteration.
-            await session.commit()
+        outcome = await _process_calls(
+            session=session,
+            run=run,
+            run_span=run_span,
+            context=context,
+            messages=messages,
+            config=config,
+            policy=policy,
+            calls=response.tool_calls,
+            start_index=0,
+            approved_hash=approved_hash,
+            allowed_tool_names=allowed_tool_names,
+            usage=usage,
+            ledger=ledger,
+            cancel_event=cancel_event,
+        )
+        if outcome is not None:
+            return outcome
 
     raise ExecutionLimitExceeded(
         "The run reached its maximum number of steps.",
@@ -684,7 +969,7 @@ async def _finalize(
     else:
         run_span.status = "ok"
         run_span.ended_at = now
-        run_span.duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        run_span.duration_ms = run.duration_ms
 
     event_type = {
         "succeeded": "run.succeeded",
@@ -760,6 +1045,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 {
                     "agent_id": str(run.agent_id),
                     "agent_version_id": str(run.agent_version_id),
+                    "replay": bool(run.replay_mode),
                 },
                 "info",
             )
@@ -805,6 +1091,14 @@ async def execute_run(run_id: uuid.UUID) -> None:
                     status="failed",
                     error_code=exc.code.value,
                     error_summary=exc.message,
+                    output=_partial_output(
+                        ledger.completed_actions,
+                        step=ledger.step,
+                        usage=usage,
+                        reason=exc.message,
+                    )
+                    if ledger.completed_actions
+                    else None,
                     usage=usage,
                 )
             except Exception:
@@ -823,4 +1117,208 @@ async def execute_run(run_id: uuid.UUID) -> None:
         cancellation.clear(run_id)
 
 
-__all__ = ["Usage", "execute_run"]
+async def resume_run(run_id: uuid.UUID, approval_id: uuid.UUID) -> None:
+    """Continue a run that paused for approval.
+
+    The action is re-validated against the current policy immediately before
+    it executes, and the approved payload hash must still match the proposed
+    one. A changed, expired or revoked approval never executes anything.
+    """
+    cancel_event = cancellation.register(run_id)
+    session_factory = get_session_factory()
+    try:
+        async with session_factory() as session:
+            run = await session.get(AgentRun, run_id)
+            if run is None or run.status != "awaiting_approval":
+                return
+            approval = await session.get(ApprovalRequest, approval_id)
+            if approval is None or approval.run_id != run_id:
+                return
+            if approval.status != "approved":
+                return
+            if approval_service.is_expired(approval):
+                approval.status = "expired"
+                run.status = "failed"
+                run.error_code = "APPROVAL_EXPIRED"
+                run.error_summary = "The approval expired before the action could run."
+                run.completed_at = _now()
+                await _emit(
+                    session,
+                    run,
+                    "run.failed",
+                    {
+                        "status": "failed",
+                        "error_code": "APPROVAL_EXPIRED",
+                        "error_summary": run.error_summary,
+                    },
+                    "error",
+                )
+                await session.commit()
+                return
+
+            checkpoint = await _load_checkpoint(session, run=run)
+            if checkpoint is None:
+                run.status = "failed"
+                run.error_code = "APPROVAL_REQUIRED"
+                run.error_summary = "The run state needed to continue is no longer available."
+                run.completed_at = _now()
+                await session.commit()
+                return
+
+            state = RunState.from_payload(checkpoint.state)
+            policy = await policy_service.get_policy(session, workspace_id=run.workspace_id)
+            policy_service.assert_execution_allowed(policy, agent_id=run.agent_id)
+
+            usage = Usage()
+            ledger = RunLedger()
+            started = time.monotonic()
+            run.status = "running"
+            run.pending_approval_id = None
+            run_span = await session.scalar(
+                select(TraceSpan)
+                .where(TraceSpan.run_id == run.id, TraceSpan.span_type == "agent_run")
+                .order_by(TraceSpan.started_at)
+                .limit(1)
+            )
+            if run_span is None:
+                run_span = _start_span(
+                    session,
+                    run,
+                    span_type="agent_run",
+                    name=f"agent:{run.agent_id}",
+                    parent_span_id=None,
+                    attributes={"agent_id": str(run.agent_id), "resumed": True},
+                )
+            else:
+                run_span.status = "running"
+                run_span.ended_at = None
+            await session.flush()
+            await _emit(
+                session,
+                run,
+                "run.resumed",
+                {
+                    "approval_id": str(approval.id),
+                    "tool": approval.tool_name,
+                    "canonical_arguments_hash": approval.canonical_arguments_hash,
+                    "step": state.step,
+                },
+                "info",
+            )
+            await session.commit()
+
+            try:
+                outcome = await _run_loop(
+                    session,
+                    run,
+                    run_span,
+                    cancel_event,
+                    started,
+                    usage,
+                    ledger,
+                    state=state,
+                    policy=policy,
+                    approved_hash=approval.canonical_arguments_hash,
+                )
+            except RunCancelled:
+                outcome = Outcome(
+                    status="cancelled",
+                    error_code="RUN_CANCELLED",
+                    error_summary="The run was cancelled.",
+                    usage=usage,
+                )
+            except ProviderError as exc:
+                outcome = Outcome(
+                    status="failed",
+                    error_code="PROVIDER_UNAVAILABLE",
+                    error_summary=_map_provider_error(exc).message,
+                    usage=usage,
+                )
+            except ExecutionLimitExceeded as exc:
+                outcome = Outcome(
+                    status="failed",
+                    error_code=exc.code.value,
+                    error_summary=exc.message,
+                    output=_partial_output(
+                        ledger.completed_actions,
+                        step=ledger.step,
+                        usage=usage,
+                        reason=exc.message,
+                    ),
+                    usage=usage,
+                )
+            except AppError as exc:
+                outcome = Outcome(
+                    status="failed",
+                    error_code=exc.code.value,
+                    error_summary=exc.message,
+                    output=_partial_output(
+                        ledger.completed_actions,
+                        step=ledger.step,
+                        usage=usage,
+                        reason=exc.message,
+                    )
+                    if ledger.completed_actions
+                    else None,
+                    usage=usage,
+                )
+            except Exception:
+                logger.exception("run_resume_crashed", extra={"run_id": str(run_id)})
+                outcome = Outcome(
+                    status="failed",
+                    error_code=InternalError.code.value,
+                    error_summary="The run failed because of an internal error.",
+                    usage=usage,
+                )
+
+            if outcome.status == "succeeded":
+                await approval_service.mark_executed(session, approval=approval)
+            await _finalize(session, run, run_span, outcome, started)
+    except Exception:
+        logger.exception("run_resume_worker_crashed", extra={"run_id": str(run_id)})
+    finally:
+        cancellation.clear(run_id)
+
+
+async def fail_paused_run(
+    session: AsyncSession,
+    *,
+    run: AgentRun,
+    error_code: str,
+    error_summary: str,
+) -> None:
+    """End a run that paused for approval when the reviewer declined.
+
+    The run never executed the action, so it ends as a controlled failure with
+    a clear reason instead of staying paused forever.
+    """
+    run.status = "failed"
+    run.error_code = error_code
+    run.error_summary = error_summary
+    run.completed_at = _now()
+    run.pending_approval_id = None
+    await _emit(
+        session,
+        run,
+        "run.failed",
+        {
+            "status": "failed",
+            "error_code": error_code,
+            "error_summary": error_summary,
+        },
+        "error",
+    )
+    await audit_service.record_event(
+        session,
+        action="run.failed",
+        resource_type="agent_run",
+        resource_id=str(run.id),
+        workspace_id=run.workspace_id,
+        actor_id=run.initiated_by,
+        outcome="failure",
+        metadata={"error_code": error_code, "error_summary": error_summary},
+    )
+    await session.commit()
+
+
+__all__ = ["Usage", "execute_run", "fail_paused_run", "resume_run"]

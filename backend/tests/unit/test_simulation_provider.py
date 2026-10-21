@@ -17,6 +17,9 @@ DRAFT_TOOL = ToolSpec(
 CUSTOMER_TOOL = ToolSpec(
     name="search_customers", description="Customers", input_schema={"type": "object"}
 )
+MARK_TOOL = ToolSpec(
+    name="mark_deal_contacted", description="Mark contacted", input_schema={"type": "object"}
+)
 
 DEAL_RESULT = {
     "deals": [
@@ -190,6 +193,60 @@ async def test_output_is_deterministic() -> None:
 
     assert first.tool_calls == second.tool_calls
     assert first.usage == second.usage
+
+
+async def test_a_contact_request_proposes_the_write_tool_for_approval() -> None:
+    """The scripted write path exists so the approval gate is reachable."""
+    provider = SimulationProvider()
+    messages = [
+        ChatMessage(
+            role="user",
+            content="Find the top deal and mark it as contacted after the call.",
+        ),
+        ChatMessage(
+            role="tool",
+            content=json.dumps(DEAL_RESULT),
+            tool_call_id="sim_call_1",
+            tool_name="search_deals",
+        ),
+    ]
+
+    response = await provider.chat(
+        ModelRequest(
+            model="simulation-deterministic",
+            messages=messages,
+            tools=[DEAL_TOOL, MARK_TOOL],
+        )
+    )
+
+    assert response.finish_reason == "tool_calls"
+    call = response.tool_calls[0]
+    assert call.name == "mark_deal_contacted"
+    assert call.arguments["deal_id"] == DEAL_RESULT["deals"][0]["deal_id"]
+    assert "contact" in call.arguments["note"].lower()
+
+
+async def test_the_contact_request_ignores_a_workspace_without_the_write_tool() -> None:
+    provider = SimulationProvider()
+    messages = [
+        ChatMessage(role="user", content="Mark the deal as contacted."),
+        ChatMessage(
+            role="tool",
+            content=json.dumps(DEAL_RESULT),
+            tool_call_id="sim_call_1",
+            tool_name="search_deals",
+        ),
+    ]
+
+    response = await provider.chat(
+        ModelRequest(
+            model="simulation-deterministic",
+            messages=messages,
+            tools=[DEAL_TOOL, DRAFT_TOOL],
+        )
+    )
+
+    assert all(call.name != "mark_deal_contacted" for call in response.tool_calls)
 
 
 def test_capabilities_are_explicit() -> None:

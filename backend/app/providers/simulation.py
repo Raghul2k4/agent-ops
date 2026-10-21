@@ -28,6 +28,12 @@ _AMOUNT_RE = re.compile(
     re.I,
 )
 _DAYS_RE = re.compile(r"(\d+)\s*days?", re.I)
+#: An explicit request to record a contact. It maps to the write tool that
+#: changes a business record, which the runtime then holds for approval.
+_CONTACT_REQUEST_RE = re.compile(
+    r"(mark|record|log|note)\b[^.]*\b(contact|contacted|call|spoke|talked)\b",
+    re.I,
+)
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
@@ -116,6 +122,29 @@ class SimulationProvider:
             )
 
         deals = self._tool_payload(tool_messages, "search_deals")
+        if (
+            deals is not None
+            and "mark_deal_contacted" in tool_names
+            and "mark_deal_contacted" not in already_called
+            and _CONTACT_REQUEST_RE.search(lowered)
+        ):
+            # The scripted path for a write action: it proposes the tool, and
+            # the runtime stops for a human decision before anything changes.
+            items = deals.get("deals") or []
+            if items:
+                first = items[0]
+                return (
+                    ModelToolCall(
+                        id="sim_call_3",
+                        name="mark_deal_contacted",
+                        arguments={
+                            "deal_id": first.get("deal_id"),
+                            "note": "Simulated contact recorded at the operator's request.",
+                        },
+                    ),
+                    "",
+                )
+
         if (
             deals is not None
             and "create_followup_draft" in tool_names

@@ -32,6 +32,7 @@ async def create_run(
     actor_id: uuid.UUID | None,
     run_input: dict[str, Any],
     replay_of_run_id: uuid.UUID | None = None,
+    replay_mode: bool = False,
 ) -> AgentRun:
     configuration = AgentConfiguration.model_validate(version.configuration)
     run = AgentRun(
@@ -43,6 +44,7 @@ async def create_run(
         input=run_input,
         model_config_id=configuration.model_config_id,
         replay_of_run_id=replay_of_run_id,
+        replay_mode=replay_mode,
     )
     session.add(run)
     await session.flush()
@@ -58,12 +60,26 @@ def schedule_execution(run_id: uuid.UUID) -> None:
     task.add_done_callback(_tasks.discard)
 
 
+def schedule_resume(run_id: uuid.UUID, approval_id: uuid.UUID) -> None:
+    """Continue a paused run in the background after the decision commits."""
+    from app.runtime.engine import resume_run
+
+    task = asyncio.create_task(resume_run(run_id, approval_id), name=f"agent-resume-{run_id}")
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
 async def list_runs(
     session: AsyncSession,
     *,
     workspace_id: uuid.UUID,
     status: str | None = None,
     agent_id: uuid.UUID | None = None,
+    error_code: str | None = None,
+    model_config_id: uuid.UUID | None = None,
+    tool_name: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
     limit: int = 25,
     offset: int = 0,
 ) -> tuple[list[tuple[AgentRun, str | None, int | None]], int]:
@@ -72,6 +88,24 @@ async def list_runs(
         conditions.append(AgentRun.status == status)
     if agent_id:
         conditions.append(AgentRun.agent_id == agent_id)
+    if error_code:
+        conditions.append(AgentRun.error_code == error_code)
+    if model_config_id:
+        conditions.append(AgentRun.model_config_id == model_config_id)
+    if created_after:
+        conditions.append(AgentRun.created_at >= created_after)
+    if created_before:
+        conditions.append(AgentRun.created_at <= created_before)
+    if tool_name:
+        # The tool filter reads the persisted event log, never the live run.
+        conditions.append(
+            AgentRun.id.in_(
+                select(RunEvent.run_id).where(
+                    RunEvent.event_type == "tool.request",
+                    RunEvent.payload["tool"].astext == tool_name,
+                )
+            )
+        )
 
     base = (
         select(AgentRun, Agent.name, AgentVersion.version_number)
@@ -151,15 +185,12 @@ async def get_spans(
 async def request_cancel(session: AsyncSession, *, run: AgentRun) -> AgentRun:
     if run.status in TERMINAL_RUN_STATUSES:
         raise ConflictError("This run has already finished.")
-    if run.status == "awaiting_approval":
-        raise ConflictError(
-            "This run is paused for approval; implement the approval decision to resolve it."
-        )
     cancellation.request_cancellation(run.id)
     run.status = "cancelled"
     run.completed_at = datetime.now(UTC)
     run.error_code = "RUN_CANCELLED"
     run.error_summary = "Cancelled by the user."
+    run.pending_approval_id = None
     session.add(run)
     await session.flush()
     return run
@@ -191,6 +222,8 @@ def run_read(
         "error_code": run.error_code,
         "error_summary": run.error_summary,
         "replay_of_run_id": run.replay_of_run_id,
+        "pending_approval_id": run.pending_approval_id,
+        "replay_mode": bool(run.replay_mode),
         "created_at": run.created_at,
     }
 

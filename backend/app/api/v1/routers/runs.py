@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,8 @@ from app.core.config import settings
 from app.core.errors import ResourceNotFound
 from app.core.permissions import Permission
 from app.db.session import get_session_factory
+from app.models.agents import AgentVersion
+from app.models.policies import ApprovalRequest
 from app.models.runs import AgentRun, RunEvent
 from app.schemas.common import Page
 from app.schemas.runs import (
@@ -27,7 +30,9 @@ from app.schemas.runs import (
     TraceView,
 )
 from app.services import agents as agent_service
+from app.services import approvals as approval_service
 from app.services import audit as audit_service
+from app.services import policies as policy_service
 from app.services import runs as run_service
 
 router = APIRouter(prefix=f"{settings.api_prefix}/runs", tags=["runs"])
@@ -57,6 +62,11 @@ async def list_runs(
     workspace_id: uuid.UUID = Query(...),
     status_filter: str | None = Query(default=None, alias="status"),
     agent_id: uuid.UUID | None = Query(default=None),
+    error_code: str | None = Query(default=None),
+    model_config_id: uuid.UUID | None = Query(default=None),
+    tool_name: str | None = Query(default=None, max_length=120),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     context: AuthContext = Depends(get_auth_context),
@@ -73,6 +83,11 @@ async def list_runs(
         workspace_id=workspace_id,
         status=status_filter,
         agent_id=agent_id,
+        error_code=error_code,
+        model_config_id=model_config_id,
+        tool_name=tool_name,
+        created_after=created_after,
+        created_before=created_before,
         limit=limit,
         offset=offset,
     )
@@ -108,6 +123,9 @@ async def create_run(
     version = await agent_service.resolve_version(
         session, agent=agent, version_id=payload.version_id
     )
+    policy = await policy_service.get_policy(session, workspace_id=agent.workspace_id)
+    policy_service.assert_execution_allowed(policy, agent_id=agent.id)
+    await policy_service.assert_run_quota(session, policy=policy)
     run = await run_service.create_run(
         session,
         agent=agent,
@@ -246,6 +264,65 @@ async def get_trace(
     )
 
 
+@router.post(
+    "/{run_id}/replay",
+    response_model=RunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Replay a run in safe mode",
+)
+async def replay_run(
+    run_id: uuid.UUID,
+    context: AuthContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> RunRead:
+    """Re-run a recorded run without repeating irreversible actions.
+
+    The replay links to the original run and runs in *safe mode*: any tool
+    that changes a business record stops for a fresh human decision instead
+    of repeating the side effect.
+    """
+    run = await _authorized_run(
+        session, context=context, run_id=run_id, permission=Permission.RUN_EXECUTE
+    )
+    agent = await agent_service.get_agent_by_id(session, agent_id=run.agent_id)
+    version = await session.get(AgentVersion, run.agent_version_id)
+    if version is None:
+        raise ResourceNotFound("The agent version used by this run no longer exists.")
+
+    policy = await policy_service.get_policy(session, workspace_id=run.workspace_id)
+    policy_service.assert_execution_allowed(policy, agent_id=agent.id)
+    await policy_service.assert_run_quota(session, policy=policy)
+
+    replay = await run_service.create_run(
+        session,
+        agent=agent,
+        version=version,
+        actor_id=context.actor_id,
+        run_input=dict(run.input),
+        replay_of_run_id=run.id,
+        replay_mode=True,
+    )
+    await audit_service.record_event(
+        session,
+        action="run.replay",
+        resource_type="agent_run",
+        resource_id=str(replay.id),
+        workspace_id=run.workspace_id,
+        actor_id=context.actor_id,
+        metadata={
+            "source_run_id": str(run.id),
+            "agent_id": str(agent.id),
+            "version_number": version.version_number,
+            "note": ("Safe replay: tools that change a business record require a fresh approval."),
+        },
+    )
+    await session.commit()
+    run_service.schedule_execution(replay.id)
+    return RunRead(
+        **run_service.run_read(replay, agent_name=agent.name, version_number=version.version_number)
+    )
+
+
 @router.post("/{run_id}/cancel", response_model=RunRead, summary="Cancel a run")
 async def cancel_run(
     run_id: uuid.UUID,
@@ -255,7 +332,13 @@ async def cancel_run(
     run = await _authorized_run(
         session, context=context, run_id=run_id, permission=Permission.RUN_CANCEL
     )
+    pending_approval_id = run.pending_approval_id
     await run_service.request_cancel(session, run=run)
+    if pending_approval_id is not None:
+        # A cancelled run leaves no actionable approval behind.
+        approval = await session.get(ApprovalRequest, pending_approval_id)
+        if approval is not None and approval.status in {"pending", "approved"}:
+            await approval_service.revoke(session, approval=approval, note="The run was cancelled.")
     await audit_service.record_event(
         session,
         action="run.cancel",

@@ -75,13 +75,26 @@ def provider_tool_specs(specs: list[ToolSpec]) -> list[Any]:
     ]
 
 
-async def execute_tool(
+@dataclass(frozen=True, slots=True)
+class PreparedToolCall:
+    """A tool call that passed resolution, authorization and validation.
+
+    The canonical arguments and their hash are the payload an approval is
+    bound to: what the reviewer sees is exactly what will execute.
+    """
+
+    spec: ToolSpec
+    arguments: dict[str, Any]
+    canonical_hash: str
+
+
+async def prepare_tool_call(
     context: ToolContext,
     *,
     tool_name: str,
     raw_arguments: dict[str, Any] | None,
-) -> ToolExecution:
-    """Validate and execute one tool call."""
+) -> PreparedToolCall:
+    """Resolve, authorize and validate a proposed call without executing it."""
     tool = registry.get(tool_name)
     if tool is None:
         raise InvalidToolArguments(
@@ -111,18 +124,31 @@ async def execute_tool(
         ) from exc
 
     canonical_arguments = validated.model_dump(mode="json")
-    if spec.requires_approval:
-        raise ToolApprovalRequiredError(
-            tool_name=spec.name,
-            arguments=canonical_arguments,
-            canonical_hash=hash_payload({"tool": spec.name, "arguments": canonical_arguments}),
-            risk_level=spec.risk_level,
-            tool_definition_id=spec.definition_id,
+    return PreparedToolCall(
+        spec=spec,
+        arguments=canonical_arguments,
+        canonical_hash=hash_payload({"tool": spec.name, "arguments": canonical_arguments}),
+    )
+
+
+async def execute_prepared(
+    context: ToolContext,
+    *,
+    prepared: PreparedToolCall,
+) -> ToolExecution:
+    """Execute an already validated call under its bounded timeout."""
+    tool = registry.get(prepared.spec.name)
+    if tool is None:  # pragma: no cover - the registry is fixed at import time
+        raise InvalidToolArguments(
+            "The requested tool is not registered in this workspace runtime.",
+            details={"tool": prepared.spec.name},
         )
+    spec = tool.spec
 
     started = time.perf_counter()
     try:
         async with asyncio.timeout(spec.timeout_seconds):
+            validated = spec.input_model.model_validate(prepared.arguments)
             result = await tool.execute(context, validated)
     except (LookupError, ValueError) as exc:
         raise ToolExecutionFailed(
@@ -157,16 +183,38 @@ async def execute_tool(
         tool_name=spec.name,
         tool_definition_id=spec.definition_id,
         risk_level=spec.risk_level,
-        arguments=canonical_arguments,
+        arguments=prepared.arguments,
         output=payload,
         duration_ms=duration_ms,
         tool_version=spec.version,
     )
 
 
+async def execute_tool(
+    context: ToolContext,
+    *,
+    tool_name: str,
+    raw_arguments: dict[str, Any] | None,
+) -> ToolExecution:
+    """Validate and execute one tool call."""
+    prepared = await prepare_tool_call(context, tool_name=tool_name, raw_arguments=raw_arguments)
+    if prepared.spec.requires_approval:
+        raise ToolApprovalRequiredError(
+            tool_name=prepared.spec.name,
+            arguments=prepared.arguments,
+            canonical_hash=prepared.canonical_hash,
+            risk_level=prepared.spec.risk_level,
+            tool_definition_id=prepared.spec.definition_id,
+        )
+    return await execute_prepared(context, prepared=prepared)
+
+
 __all__ = [
     "MAX_RESULT_BYTES",
+    "PreparedToolCall",
     "ToolExecution",
+    "execute_prepared",
     "execute_tool",
+    "prepare_tool_call",
     "provider_tool_specs",
 ]

@@ -29,6 +29,8 @@ class ErrorCode(StrEnum):
     TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
+    APPROVAL_MISMATCH = "APPROVAL_MISMATCH"
+    APPROVAL_REJECTED = "APPROVAL_REJECTED"
     POLICY_VIOLATION = "POLICY_VIOLATION"
     EXECUTION_LIMIT_EXCEEDED = "EXECUTION_LIMIT_EXCEEDED"
     RUN_CANCELLED = "RUN_CANCELLED"
@@ -69,6 +71,8 @@ ERROR_SPECS: dict[ErrorCode, ErrorSpec] = {
     ErrorCode.TOOL_EXECUTION_FAILED: ErrorSpec(500, retryable=False, terminal=True),
     ErrorCode.APPROVAL_REQUIRED: ErrorSpec(202, retryable=False, terminal=False),
     ErrorCode.APPROVAL_EXPIRED: ErrorSpec(409, retryable=False, terminal=True),
+    ErrorCode.APPROVAL_MISMATCH: ErrorSpec(409, retryable=False, terminal=True),
+    ErrorCode.APPROVAL_REJECTED: ErrorSpec(409, retryable=False, terminal=True),
     ErrorCode.POLICY_VIOLATION: ErrorSpec(403, retryable=False, terminal=True, alert=True),
     ErrorCode.EXECUTION_LIMIT_EXCEEDED: ErrorSpec(429, retryable=False, terminal=True),
     ErrorCode.RUN_CANCELLED: ErrorSpec(409, retryable=False, terminal=True),
@@ -195,9 +199,27 @@ class ApprovalRequired(AppError):
     default_message = "This action requires human approval before it can run."
 
 
+class ApprovalExpired(AppError):
+    code = ErrorCode.APPROVAL_EXPIRED
+    default_message = "This approval request has expired."
+
+
+class ApprovalMismatch(AppError):
+    code = ErrorCode.APPROVAL_MISMATCH
+    default_message = "The action no longer matches the approved payload."
+
+
+class ApprovalRejected(AppError):
+    code = ErrorCode.APPROVAL_REJECTED
+    default_message = "The reviewer rejected this action."
+
+
 __all__ = [
     "ERROR_SPECS",
     "AppError",
+    "ApprovalExpired",
+    "ApprovalMismatch",
+    "ApprovalRejected",
     "ApprovalRequired",
     "AuthenticationRequired",
     "ConflictError",

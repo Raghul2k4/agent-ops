@@ -28,6 +28,7 @@ from app.schemas.agents import (
 from app.schemas.runs import RunRead
 from app.services import agents as agent_service
 from app.services import audit as audit_service
+from app.services import policies as policy_service
 from app.services import runs as run_service
 
 router = APIRouter(prefix=f"{settings.api_prefix}/agents", tags=["agents"])
@@ -371,6 +372,9 @@ async def run_agent(
     version = await agent_service.resolve_version(
         session, agent=agent, version_id=payload.version_id
     )
+    policy = await policy_service.get_policy(session, workspace_id=agent.workspace_id)
+    policy_service.assert_execution_allowed(policy, agent_id=agent.id)
+    await policy_service.assert_run_quota(session, policy=policy)
     run = await run_service.create_run(
         session,
         agent=agent,
@@ -378,6 +382,7 @@ async def run_agent(
         actor_id=context.actor_id,
         run_input=payload.input,
         replay_of_run_id=payload.replay_of_run_id,
+        replay_mode=payload.replay_of_run_id is not None,
     )
     await audit_service.record_event(
         session,

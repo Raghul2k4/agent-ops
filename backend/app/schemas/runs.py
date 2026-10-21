@@ -49,6 +49,8 @@ class RunRead(BaseModel):
     error_code: str | None = None
     error_summary: str | None = None
     replay_of_run_id: uuid.UUID | None = None
+    pending_approval_id: uuid.UUID | None = None
+    replay_mode: bool = False
     created_at: datetime
 
 
