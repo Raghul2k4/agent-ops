@@ -1,7 +1,8 @@
 # AgentOps — Database Schema
 
-**Authority:** [`supabase/migrations/20261021120000_initial_identity_schema.sql`](../supabase/migrations/20261021120000_initial_identity_schema.sql)
-and [`supabase/migrations/20261021130000_agents_providers_tools_runtime.sql`](../supabase/migrations/20261021130000_agents_providers_tools_runtime.sql).
+**Authority:** [`supabase/migrations/20261021120000_initial_identity_schema.sql`](../supabase/migrations/20261021120000_initial_identity_schema.sql),
+[`supabase/migrations/20261021130000_agents_providers_tools_runtime.sql`](../supabase/migrations/20261021130000_agents_providers_tools_runtime.sql) and
+[`supabase/migrations/20261021140000_safety_approvals_observability.sql`](../supabase/migrations/20261021140000_safety_approvals_observability.sql).
 These documents describe the current schema; if the two disagree, the migration wins.
 
 **Database:** Supabase Postgres (PostgreSQL 17). Domain objects live in the `app` schema; privileged
@@ -192,8 +193,22 @@ workspace-scoped policies that mirror the API's authorization rules.
 | `app.followup_drafts` | Draft follow-up messages | `customer_id`, `deal_id`, `subject`, `body`, `status` | Internal and reversible; no message is ever sent |
 
 Event types recorded by the runtime: `run.started`, `model.request`, `model.response`,
-`tool.request`, `tool.cached`, `tool.result`, `tool.error`, `approval.required`, `run.succeeded`,
-`run.failed`, `run.cancelled`, `run.awaiting_approval`.
+`tool.request`, `tool.cached`, `tool.result`, `tool.error`, `approval.required`,
+`run.resumed`, `run.succeeded`, `run.failed`, `run.cancelled`, `run.awaiting_approval`.
+
+### 2.9 M3 tables — policy, approvals and checkpoints
+
+Added by `20261021140000_safety_approvals_observability.sql`. Every table enables RLS and carries
+workspace-scoped policies that mirror the API's authorization rules.
+
+| Table | Purpose | Key columns | Notes |
+|---|---|---|---|
+| `app.workspace_policies` | The workspace's enforcement document | `workspace_id` (PK), `version`, `tool_allowlist`, `blocked_tools`, `disabled_agent_ids`, `require_approval_for_risk_levels`, `tool_rate_limits`, `max_tool_calls_per_run`, `max_runs_per_hour`, `approval_ttl_minutes`, `execution_paused`, `paused_reason` | One row per workspace; the version is stamped on runs and approvals |
+| `app.approval_requests` | A proposed action waiting for a human decision | `run_id`, `tool_name`, `risk_level`, `canonical_arguments_hash`, `arguments`, `status`, `decision`, `decided_by`, `decided_at`, `review_note`, `policy_version`, `expires_at` | A partial unique index allows only one **pending** request per (run, payload hash) |
+| `app.run_checkpoints` | The state that lets a paused run continue | `run_id`, `step`, `state` (jsonb) | Stores the conversation, the counters and the pending call |
+
+`app.agent_runs` gained two columns in M3: `pending_approval_id` (the request the run waits for)
+and `replay_mode` (true when the run is a safe replay).
 
 ---
 

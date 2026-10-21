@@ -116,6 +116,7 @@ Applied migrations to date:
 |---|---|
 | `20261021120000_initial_identity_schema.sql` | profiles, local credentials, workspaces, memberships, preferences, API keys, audit events + RLS |
 | `20261021130000_agents_providers_tools_runtime.sql` | model providers and models, agents and immutable versions, tool definitions and bindings, synthetic CRM tables, agent runs, run events, trace spans, follow-up drafts + RLS |
+| `20261021140000_safety_approvals_observability.sql` | workspace policies, approval requests, run checkpoints, the run's pending-approval and replay-mode columns + RLS |
 
 ---
 
@@ -295,7 +296,18 @@ bootstrap, not a product code path: the application never writes to `auth.*`.
 | RLS regression | `supabase/tests/rls_policies.sql` passes on the hosted project with the M2 tables present |
 | Provider credential | Stored only as the environment-variable name `OPENROUTER_API_KEY`; the value never reached the database, an API response, the logs or the browser bundle |
 | Browser end-to-end | Workspace → provider → model → agent → publish → run → trace, exercised in a real browser against the hosted project |
-| Retained demo data | The hosted project keeps one demonstration workspace (`AgentOps Demo`) with 3 agents, 5 runs, the synthetic CRM dataset and both providers, so the platform can be inspected without re-seeding. The demo identity is bootstrapped with SQL because the project requires email confirmation; **its password is not stored in this repository** |
+| Retained demo data | The hosted project keeps one demonstration workspace (`AgentOps Demo`) with the agents, runs, the synthetic CRM dataset and both providers, so the platform can be inspected without re-seeding. The demo identity is bootstrapped with SQL because the project requires email confirmation; **its password is not stored in this repository** |
+
+### 8.2 M3 verification (2026-10-21)
+
+| Check | Result |
+|---|---|
+| M3 migration applied | `20261021140000_safety_approvals_observability.sql` applied to the hosted project and to the local test database |
+| Tables | 3 new tables in `app` (workspace policies, approval requests, run checkpoints) plus 2 columns on `app.agent_runs`; RLS enabled on all |
+| Policies | 12 new policies; the policy change increments the document version |
+| Approval flow | A high-risk tool paused the run; approving the quoted payload hash in the browser resumed it and only then did the business record change |
+| Replay | Replaying a run re-ran the scenario and stopped the write action for a fresh decision; the replay links to the source run |
+| Policy | The emergency pause refused a new run with `POLICY_VIOLATION` and the policy version in the error details |
 
 ---
 

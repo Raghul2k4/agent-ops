@@ -92,10 +92,22 @@ policy (approval, timeout, idempotency) and only then executes.
 result is reused and a `tool.cached` event is emitted. A model therefore cannot duplicate a side
 effect by repeating itself.
 
+**Tool-set boundary:** the published version fixes the tool set. A call to a tool the version was
+not granted is refused with `POLICY_VIOLATION` before the tool body runs, whatever the model — or a
+tool result — asked for.
+
 **Budgets:** `max_steps`, `max_tool_calls`, `max_wall_clock_seconds`, `max_total_tokens`,
 `max_cost_usd`. Exceeding any of them ends the run with `EXECUTION_LIMIT_EXCEEDED` — it never
 silently truncates, and the failure output carries `stopped_because` plus the `completed_actions`
 the run did perform.
+
+**Approvals (M3):** a call that the policy marks as approval-worthy does not execute. The runtime
+writes an `app.approval_requests` row bound to the SHA-256 hash of the canonical
+`{tool, arguments}` payload, stores a `app.run_checkpoints` row with the conversation and the
+pending call, and the run ends in `awaiting_approval`. A reviewer's decision must quote the same
+hash; on approval the run resumes from the checkpoint, re-validates the tool against the current
+policy and the published tool set, and only then executes it. A rejection or an expiry ends the run
+with the business record untouched.
 
 **Retries:** only for idempotent operations and only for retryable error classes
 (`PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`) with exponential backoff + jitter.

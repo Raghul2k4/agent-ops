@@ -6,11 +6,12 @@ AgentOps lets a team design AI agents and visual workflows, execute them against
 and models, inspect every execution trace, benchmark model quality, and govern what agents are
 allowed to do.
 
-> **Status: M0, M1 and M2 delivered and verified.** Supabase Auth owns identity, Supabase Postgres
+> **Status: M0, M1, M2 and M3 delivered and verified.** Supabase Auth owns identity, Supabase Postgres
 > is the system of record, and the FastAPI service verifies every Supabase access token against the
 > project's JWKS. Agents, provider adapters, the tool registry, the runtime, persisted runs and
-> traces are live; the remaining milestones (workflows, approvals, evaluations, knowledge, analytics)
-> are tracked in [`docs/roadmap.md`](docs/roadmap.md) and [`PLAN.md`](PLAN.md).
+> traces, the workspace policy and the human-in-the-loop approval queue are live; the remaining
+> milestones (workflows, evaluations, knowledge, memory, scheduling, analytics) are tracked in
+> [`docs/roadmap.md`](docs/roadmap.md) and [`PLAN.md`](PLAN.md).
 >
 > Nothing in this repository is mocked-up "success": a feature is listed only when its backend,
 > persistence, authorization and tests exist and have been run. Hosted-Supabase verification is
@@ -24,9 +25,35 @@ allowed to do.
 |---|---|---|
 | **Build** | Agents with versioned configuration, drafts and immutable published versions; visual workflow canvas | Agents delivered (M2); canvas planned (M4) |
 | **Execute** | Custom runtime, registered tools, provider adapters (Ollama / OpenAI-compatible / Anthropic / labelled simulation) | Delivered (M2) |
-| **Observe** | Persistent run history, hierarchical traces, live event stream, safe replay | Runs and traces delivered (M2); replay planned (M3) |
+| **Observe** | Persistent run history, hierarchical traces, live event stream, safe replay | Delivered (M2/M3) |
 | **Evaluate** | Suites, deterministic scorers, regression gates | Planned (M6) |
-| **Govern** | Workspace RBAC (delivered), tool risk classification, budgets, approvals, audit log | RBAC, risk and budgets delivered (M1/M2); approval decisions planned (M3) |
+| **Govern** | Workspace RBAC, tool risk classification, budgets, approvals, policy document, audit log | Delivered (M1–M3) |
+
+---
+
+## What M3 actually delivers
+
+- **Workspace policy** — one document per workspace: tool allow/deny lists, disabled agents, the
+  risk levels that need a human decision, per-tool rate limits, a run quota, a tool-call override
+  and an **emergency pause**. It is enforced server-side on every run and every tool call, and its
+  version is stamped on runs and approvals.
+- **Approvals bound to the exact action** — a protected tool stops the run, writes a request with
+  the canonical arguments and their SHA-256 hash, and waits. A decision must quote that hash; a
+  changed payload, an expired request, a duplicate decision or a caller without the permission is
+  refused and nothing executes.
+- **Resume, not restart** — the paused run keeps a checkpoint with its conversation and the pending
+  call. After an approval it continues exactly where it stopped, re-validating the tool against the
+  current policy and the published tool set before it runs.
+- **Safe replay** — a replay links to its source run and re-runs it, but a tool that changes a
+  business record waits for a **fresh** decision instead of repeating the side effect.
+- **A closed tool-set boundary** — a model can no longer call a tool its published version was not
+  granted, whatever the model (or a tool result) asks for.
+- **Observability** — server-side filters over the run history (status, agent, model, tool, error
+  category, date range) and a live event stream that recovers missed events with the sequence
+  cursor.
+- **Security suite** — 13 regression cases covering tenant isolation, the tool-set boundary,
+  argument validation, prompt injection through a tool result, secret handling, privilege
+  escalation and idempotency.
 
 ---
 
@@ -189,8 +216,8 @@ The scratch database is separate from the hosted project: fixtures truncate it, 
 - **`supabase db lint` / advisors** need an authenticated Supabase CLI session (scoped access
   token); they were not run. The RLS assertions in `supabase/tests/rls_policies.sql` do run in the
   backend test suite against local Postgres.
-- **No approval decisions yet** (M3). A high-risk tool pauses the run with a canonical argument
-  hash and does not execute; there is no queue, approve or reject endpoint yet.
+- **An approval resume is in-process.** A restart between the decision and the resume leaves the run
+  paused (the checkpoint survives, so the M7 worker can pick it up). The UI shows the paused state.
 - **The workflow canvas, evaluations, knowledge hub, memory, scheduling and analytics are not
   built** (M4, M6, M7). Those pages are explicit placeholders, not fakes.
 - **`search_knowledge` returns an empty result** until the Knowledge Hub lands (M6); it says so

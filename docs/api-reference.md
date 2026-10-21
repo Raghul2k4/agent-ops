@@ -2,9 +2,9 @@
 
 **Base path:** `/api/v1` (configurable via `API_PREFIX`)
 **Interactive docs:** `GET /docs` (OpenAPI), `GET /openapi.json`
-**Status:** M0, M1 and M2 endpoints are live. Routes for workflows, approvals, evaluations,
-knowledge, schedules and analytics are specified in `AGENTS.md` §25 and land with their milestones —
-they are not stubs in the service today.
+**Status:** M0, M1, M2 and M3 endpoints are live. Routes for workflows, evaluations, knowledge,
+schedules and analytics are specified in `AGENTS.md` §25 and land with their milestones — they are
+not stubs in the service today.
 
 ---
 
@@ -459,32 +459,204 @@ action. It is never injected into a real workspace implicitly.
 
 ---
 
-## 8. Permission matrix (M2 additions)
+## 8. Permission matrix (M2 and M3 additions)
 
 | Endpoint | Required permission | Roles |
 |---|---|---|
 | `GET/POST /agents`, `GET /agents/{id}` | `agent.read` / `agent.write` | viewer+ / developer+ |
 | `POST /agents/{id}/publish|rollback|duplicate|archive`, `PATCH|DELETE /agents/{id}` | `agent.write` | developer+ |
-| `POST /agents/{id}/run`, `POST /runs`, `POST /runs/{id}/cancel` | `run.execute` / `run.cancel` | operator+ |
+| `POST /agents/{id}/run`, `POST /runs`, `POST /runs/{id}/cancel`, `POST /runs/{id}/replay` | `run.execute` / `run.cancel` | operator+ |
 | `GET /runs`, `GET /runs/{id}`, events, trace | `run.read` | viewer+ |
 | `GET /models/providers`, `GET /models` | `provider.read` | viewer+ |
 | `POST|PATCH|DELETE /models…`, `POST /models/providers/{id}/test` | `provider.write` | developer+ |
 | `GET /tools` | `tool.read` | viewer+ |
+| `GET /policies` | `workspace.read` | viewer+ |
+| `PATCH /policies` | `workspace.update` | owner, admin |
+| `GET /approvals` | `approval.read` | viewer+ |
+| `POST /approvals/{id}/decision` | `approval.decide` | reviewer+ |
+| `POST /approvals/{id}/revoke` | `workspace.update` | owner, admin |
 | `POST /workspaces/{id}/demo-data` | `workspace.update` | admin+ |
 
 ---
 
-## 9. Error codes used in M2
+## 9. Workspace policy — `/api/v1/policies`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `?workspace_id=` | GET | `workspace.read` | The effective policy document |
+| `?workspace_id=` | PATCH | `workspace.update` | Change the policy (owner or administrator) |
+
+```json
+{
+  "tool_allowlist": ["search_deals", "get_deal_details"],
+  "blocked_tools": ["mark_deal_contacted"],
+  "require_approval_for_risk_levels": ["medium", "high", "critical"],
+  "max_tool_calls_per_run": 12,
+  "max_runs_per_hour": 60,
+  "approval_ttl_minutes": 60,
+  "execution_paused": false,
+  "paused_reason": null
+}
+```
+
+Every field is optional; an omitted field is left unchanged. Semantics:
+
+- **tool_allowlist** — empty allows every registered tool. **blocked_tools** always wins over it.
+- **require_approval_for_risk_levels** — a tool at one of these levels stops the run and waits in
+  the approval queue. A tool that declares `requires_approval` always waits, whatever the policy
+  says.
+- **max_tool_calls_per_run** — the tighter of the agent version's own limit and this value.
+- **max_runs_per_hour** — the workspace quota; a run beyond it is refused with `RATE_LIMITED`.
+- **execution_paused** — the emergency pause. Every new run is refused with `POLICY_VIOLATION`;
+  runs already in flight continue.
+
+The policy carries a `version` that is stamped on every run and every approval request, so a
+decision can be traced back to the policy that was in force when the action was proposed.
+
+---
+
+## 10. Approvals — `/api/v1/approvals`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `?workspace_id=&status=&run_id=&tool_name=` | GET | `approval.read` | The approval queue, newest first |
+| `/{approval_id}` | GET | `approval.read` | One request with its arguments and payload hash |
+| `/{approval_id}/decision` | POST | `approval.decide` | Approve, reject or request changes |
+| `/{approval_id}/revoke` | POST | `workspace.update` | Revoke a pending request without executing it |
+
+A request carries the exact action it describes:
+
+```json
+{
+  "id": "…",
+  "run_id": "…",
+  "tool_name": "mark_deal_contacted",
+  "risk_level": "high",
+  "canonical_arguments_hash": "806a819519c8aeffda3e63a8f1b91eba193e142467c7414690f1508a4a54c4af",
+  "arguments": { "deal_id": "…", "note": "Called the customer." },
+  "status": "pending",
+  "policy_version": 1,
+  "expires_at": "2026-10-21T13:54:00Z",
+  "is_expired": false
+}
+```
+
+A decision must quote the hash the reviewer was shown:
+
+```json
+{
+  "decision": "approve",
+  "arguments_hash": "806a819519c8aeffda3e63a8f1b91eba193e142467c7414690f1508a4a54c4af",
+  "note": "Reviewed and accepted."
+}
+```
+
+| Situation | Response |
+|---|---|
+| The payload changed since it was shown | `409 APPROVAL_MISMATCH` — nothing executes |
+| The request expired | `409 APPROVAL_EXPIRED` — nothing executes |
+| The request was already decided | `409 CONFLICT` |
+| The caller may not decide | `403 PERMISSION_DENIED` |
+| The request belongs to another workspace | `404 RESOURCE_NOT_FOUND` |
+| Approved | `200`; the run resumes in the background and the action is re-validated before it runs |
+| Rejected or changes requested | `200`; the run ends with `APPROVAL_REJECTED` and the action never ran |
+
+---
+
+## 11. Runs, traces and replay — `/api/v1/runs`
+
+| Route | Method | Permission | Purpose |
+|---|---|---|---|
+| `?workspace_id=&status=&agent_id=&error_code=&model_config_id=&tool_name=&created_after=&created_before=` | GET | `run.read` | Server-side filtered and paginated history |
+| `?workspace_id=` | POST | `run.execute` | Start a run for a published agent version |
+| `/{run_id}` | GET | `run.read` | One run |
+| `/{run_id}/events?after_seq=` | GET | `run.read` | Ordered events with a cursor |
+| `/{run_id}/events/stream?after_seq=` | GET | `run.read` | Server-Sent Events for live updates |
+| `/{run_id}/trace` | GET | `run.read` | Hierarchical trace spans |
+| `/{run_id}/cancel` | POST | `run.cancel` | Cancel a run; a pending approval is revoked |
+| `/{run_id}/replay` | POST | `run.execute` | Re-run in safe mode (`202`) |
+
+A replay links to its source (`replay_of_run_id`) and sets `replay_mode`. In replay mode a tool
+that changes a business record stops for a **fresh** human decision instead of repeating the side
+effect; read-only tools run normally.
+
+Run states: `queued` → `running` → `succeeded` | `failed` | `cancelled` | `awaiting_approval`.
+
+A successful run reports the model's message and the accumulated usage:
+
+```json
+{
+  "status": "succeeded",
+  "token_usage": {
+    "input_tokens": 3557,
+    "output_tokens": 386,
+    "total_tokens": 3943,
+    "model_calls": 3,
+    "tool_calls": 2
+  },
+  "estimated_cost": 0,
+  "output": { "message": "**Customer: Ananya Das** …", "steps": 3 }
+}
+```
+
+`tool_calls` counts executed tool calls; an approval-gated call is not counted because it never
+executed. `estimated_cost` is `null` when the model has no pricing metadata.
+
+A run stopped by a budget fails with `EXECUTION_LIMIT_EXCEEDED` **and reports the work it did**:
+
+```json
+{
+  "status": "failed",
+  "error_code": "EXECUTION_LIMIT_EXCEEDED",
+  "error_summary": "The run reached its tool-call budget.",
+  "output": {
+    "message": null,
+    "steps": 3,
+    "stopped_because": "The run reached its tool-call budget.",
+    "completed_actions": [
+      { "tool": "search_deals", "risk_level": "low", "arguments": { … }, "output": { … } }
+    ]
+  }
+}
+```
+
+An identical tool call repeated inside one run is executed once; the second occurrence emits a
+`tool.cached` event and reuses the recorded result, so a model cannot duplicate a side effect.
+
+A run that pauses for approval reports the request it is waiting for:
+
+```json
+{
+  "status": "awaiting_approval",
+  "pending_approval_id": "…",
+  "output": {
+    "pending_approval": {
+      "id": "…",
+      "tool": "mark_deal_contacted",
+      "risk_level": "high",
+      "arguments": { … },
+      "canonical_arguments_hash": "…",
+      "expires_at": "…"
+    },
+    "message": null
+  }
+}
+```
+
+---
+
+## 12. Error codes used in M2 and M3
 
 `VALIDATION_ERROR`, `AUTHENTICATION_REQUIRED`, `PERMISSION_DENIED`, `RESOURCE_NOT_FOUND`,
 `CONFLICT`, `RATE_LIMITED`, `POLICY_VIOLATION`, `INTERNAL_ERROR`, plus the execution codes
 `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `INVALID_TOOL_ARGUMENTS`, `TOOL_EXECUTION_FAILED`,
-`EXECUTION_LIMIT_EXCEEDED`, `RUN_CANCELLED` and `APPROVAL_REQUIRED`.
+`EXECUTION_LIMIT_EXCEEDED`, `RUN_CANCELLED`, `APPROVAL_REQUIRED`, `APPROVAL_EXPIRED`,
+`APPROVAL_MISMATCH` and `APPROVAL_REJECTED`.
 
 ---
 
-## 10. Not implemented yet
+## 13. Not implemented yet
 
-`/workflows`, `/approvals`, `/evaluations`, `/knowledge`, `/schedules`, `/analytics`, `/api-keys` —
-specified in `AGENTS.md` §25, delivered with milestones M3–M8. They are intentionally absent rather
+`/workflows`, `/evaluations`, `/knowledge`, `/schedules`, `/analytics`, `/api-keys` —
+specified in `AGENTS.md` §25, delivered with milestones M4–M8. They are intentionally absent rather
 than returning placeholder successes.

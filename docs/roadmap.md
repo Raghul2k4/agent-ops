@@ -15,7 +15,7 @@ Last updated: 2026-10-21
 | M0 Foundation & plan | Phase 0 | **Tested** | `PLAN.md`, `docs/architecture.md`, `docs/roadmap.md`, `docs/deployment.md`, `scripts/verify_env.ps1`; repo initialised, design tokens and app shell running |
 | M1 Platform foundation | Phase 1 | **Tested** | Supabase Auth + hosted Postgres; JWKS-verified token → profile → workspace creation exercised end to end (see below); 97 backend / 19 frontend tests; lint, format, mypy, typecheck, build and bundle secret scan green |
 | M2 Agents, providers, tools, runtime | Phase 2 | **Tested** | a real agent executes registered tools against synthetic CRM data; runs, events and trace spans persisted; exercised with the labelled deterministic provider **and** a hosted cloud model (OpenRouter) |
-| M3 Safety, approvals, observability | Phase 3 | Planned | approvals bound to canonical hash; security suite green |
+| M3 Safety, approvals, observability | Phase 3 | **Tested** | a high-risk tool pauses the run; a reviewer decides the exact payload; the run resumes and only then does the record change |
 | M4 Workflow builder | Phase 4 | Planned | multi-step workflow built, validated, executed with node traces |
 | M5 Dashboard & Model Lab | Phase 5 | Planned | dashboard metrics match persisted fixtures; model comparison reproducible |
 | M6 Evaluations & Knowledge | Phase 6 | Planned | suite reproduces; documents ingest & retrieve with citations |
@@ -36,6 +36,27 @@ Last updated: 2026-10-21
 | Test data | Removed; hosted `auth.users` / `app.*` row counts returned to 0 |
 
 Details and the exact operating contract: [`docs/supabase.md`](supabase.md).
+
+### M3 evidence
+
+| Check | Result |
+|---|---|
+| Schema authority | `supabase/migrations/20261021140000_safety_approvals_observability.sql` applied to the hosted project and to the local test database |
+| Tables / policies | 3 new tables in `app` (workspace policies, approval requests, run checkpoints) with 12 policies; RLS on all three |
+| Approval pause | A high-risk tool (`mark_deal_contacted`) stopped the run: `approval.required` → `run.awaiting_approval`, the deal was **not** modified |
+| Decision | Approving the quoted payload hash in the browser resumed the run: `run.resumed` → the tool executed → `run.succeeded` (3 model calls, 2 tool calls, 1 925 tokens) |
+| Tampered payload | A decision with a different hash was refused with `APPROVAL_MISMATCH`; the run stayed paused and the record stayed unchanged |
+| Rejection | Rejecting ended the run with `APPROVAL_REJECTED`; the record stayed unchanged |
+| Expiry | An aged request was refused with `APPROVAL_EXPIRED` |
+| Policy | A blocked tool, the emergency pause, a disabled agent and the run quota each refused the run with `POLICY_VIOLATION` / `RATE_LIMITED` |
+| Safe replay | Replaying a run re-ran the scenario and stopped the write action for a **fresh** decision; the replay links to the source run |
+| Tenant isolation | Another workspace received `404` for the approval list, the detail and the decision |
+| Security suite | 13 cases: tenant isolation, tool-set boundary, argument validation, injection, secret handling, privilege escalation, idempotency |
+| Backend tests | 188 passed (`pytest`), including the 13 approval-flow cases and the 13 security cases |
+| Frontend checks | `npm run lint` 0 errors, `npm run typecheck`, `npm run test` 32 passed, `npm run build` + bundle secret scan |
+| Browser end-to-end | Pause → queue → approve → resume → execute, plus the rejection path, the emergency pause and the policy editor, all against the hosted project |
+
+---
 
 ### M2 evidence
 
@@ -61,11 +82,11 @@ Details and the exact operating contract: [`docs/supabase.md`](supabase.md).
 | C. Visual workflow builder | P0 | Planned | 13 node contracts, validated graph, interpreter |
 | D. Agent runtime & tool registry | P0 | **Tested (M2)** | 20-step lifecycle, 9 built-in CRM tools, budgets, cancellation, duplicate-call guard |
 | E. Model providers & Model Lab | P0 (Lab P1) | **Tested (M2)** | ollama / openai-compatible / anthropic / simulation; health checks, capability and pricing metadata; comparison lands in M5 |
-| F. Runs, traces, debugging | P0 | **Tested (M2)** | persisted events with cursor recovery, hierarchical trace spans, run detail; replay lands in M3 |
+| F. Runs, traces, debugging | P0 | **Tested (M2/M3)** | persisted events with cursor recovery, hierarchical trace spans, run detail, server-side filters and safe replay |
 | G. Evaluation & regression | P0/P1 | Planned | deterministic evaluators, gates, ≥30 cases |
 | H. Knowledge Hub & RAG | P1 | Planned | pgvector available on Supabase; local PG lacks it |
 | I. Agent memory | P1 | Planned | typed memory, expiry, provenance |
-| J. Approvals & governance | P0 | In progress | runtime pauses for high-risk tools with a canonical hash; decisions, queue and policies land in M3 |
+| J. Approvals & governance | P0 | **Tested (M3)** | canonical-hash approvals with resume, policy document, allow/deny lists, rate limits, quota, emergency pause |
 | K. Tools & integrations | P0/P1 | **Tested (M2)** | built-in tool registry and execution; external connectors land later |
 | L. Scheduling & automation | P1 | Planned | `pgmq` + `pg_cron` + `pg_net` |
 | M. Multi-agent orchestration | P2 | Planned | last, after single-agent reliability |
@@ -79,12 +100,12 @@ Details and the exact operating contract: [`docs/supabase.md`](supabase.md).
 |---|---|---|
 | Design system & tokens | **Tested (M0)** | semantic dark/light tokens, primitives, documented in `docs/design-system.md` |
 | App shell & navigation | **Implemented (M0)** | sidebar, top bar, workspace switcher, command palette shell |
-| API `/api/v1` | **Tested (M1)** | system, auth-mode, identity, workspaces, members; error envelope |
-| Error taxonomy (§27) | **Tested (M1)** | full code list with status/retry/terminal/alert metadata |
+| API `/api/v1` | **Tested (M1–M3)** | system, auth-mode, identity, workspaces, members, agents, providers, models, tools, runs, traces, policies, approvals; error envelope |
+| Error taxonomy (§27) | **Tested (M1–M3)** | full code list with status/retry/terminal/alert metadata, plus `APPROVAL_MISMATCH` and `APPROVAL_REJECTED` |
 | Authentication | **Tested (M1)** | Supabase JWKS verification + local dev issuer |
-| Persistence | **Tested (M1)** | SQL migrations, SQLAlchemy 2 async, pooler-safe settings |
-| Row Level Security | **Tested (M1)** | 20 policies, SQL regression assertions in the pytest suite |
-| Observability | **Implemented (M1)** | structured JSON logs, request ids, rejection reasons; metrics/OTel later |
+| Persistence | **Tested (M1–M3)** | SQL migrations, SQLAlchemy 2 async, pooler-safe settings |
+| Row Level Security | **Tested (M1–M3)** | 32 policies across the M1–M3 tables, SQL regression assertions in the pytest suite |
+| Observability | **Implemented (M1–M3)** | structured JSON logs, request ids, rejection reasons, live event stream with cursor recovery; metrics/OTel later |
 | CI | **Implemented (M1)** | backend lint/format/mypy/tests + frontend lint/typecheck/test/build/secret scan |
 | Deployment | In progress | Supabase-first runbook written; container path unverified (no Docker) |
 | Docs set | **Tested (M1)** | architecture, supabase, security, database schema, API, design system, deployment, roadmap |
@@ -102,6 +123,9 @@ Details and the exact operating contract: [`docs/supabase.md`](supabase.md).
 | D7 | Windows requires the selector event loop (`python -m app`) | Platform constraint; documented |
 | D8 | Model capability metadata is tri-state (unknown / supported / not supported) | Intentional: the platform never asserts a capability it has not confirmed |
 | D9 | An identical tool call inside one run is executed once and reused | Intentional: protects against a model duplicating a side effect |
+| D10 | A run's published tool set is enforced server-side | Intentional: a model may only call the tools its version was granted |
+| D11 | A replay re-requests a human decision for irreversible actions | Intentional: a replay never repeats a business-record change on its own |
+| D12 | The approval resume runs in-process after the decision | Reversible: the durable queue worker (M7) takes over the same entry point |
 
 ## Known limitations
 
@@ -112,10 +136,12 @@ Details and the exact operating contract: [`docs/supabase.md`](supabase.md).
 | No Docker | `supabase start` and Compose unverified | Hosted project is the development target |
 | Hosted project in `ap-northeast-2` | Extra round-trip per query (~⅓–¾ s per API call from this machine) | Deploy near users; pool connections |
 | API-key authentication not wired | `app.api_keys` is schema-only | Documented; lands with the developer platform |
-| Approval decisions not implemented | A high-risk tool pauses the run; nobody can yet approve it | Deliberate deferral to M3; the run stays `awaiting_approval` and the business record is unchanged |
 | `search_knowledge` returns an empty result | No knowledge documents exist before M6 | The tool states that the corpus is empty instead of inventing an answer |
 | Free hosted preview model loops on tool calls | The sales prompt fails with `EXECUTION_LIMIT_EXCEEDED` on that model | The budget is enforced and the completed actions are reported; the deterministic provider is the reference behaviour |
 | Provider model catalogues are large | The connection test returns a large list of model ids | Only the first ids are surfaced in the UI notice; registration is explicit |
+| The approval resume is in-process | A restart between the decision and the resume leaves the run paused | The run keeps its checkpoint, so the worker (M7) can pick it up; the UI shows the paused state |
+| A paused run's duration includes the review time | The wall-clock duration is longer than the execution time | Start and completion timestamps are both persisted and shown, so the pause is visible |
+| Per-tool rate limits are counted from the event log | A busy minute is measured over persisted events, not an in-memory counter | The count is exact for the workspace and survives restarts; a high-volume deployment moves the counter to `pgmq`/Redis |
 
 ## Delivery log
 
@@ -124,3 +150,4 @@ Details and the exact operating contract: [`docs/supabase.md`](supabase.md).
 | 2026-10-21 | M0 | Repo initialised: monorepo, design tokens, app shell, backend layering, error taxonomy, plan and architecture docs, environment audit. |
 | 2026-10-21 | M1 | Supabase identity + hosted Postgres cut-over. Migration applied (7 tables, RLS, 20 policies). Backend 97 tests, frontend 19 tests, lint/format/mypy/typecheck/build/secret scan green. Live JWKS-verified token → profile → workspace → membership verified against the hosted project; test data removed. |
 | 2026-10-21 | M2 | Agents, providers, tools and runtime. Migration applied (M2 tables, RLS, policies). Backend 159 tests, frontend 22 tests, lint/format/mypy/typecheck/build/secret scan green. Verified in a real browser against the hosted project: workspace → provider → agent → publish → run → trace, first with the labelled deterministic provider and then with a hosted cloud model (OpenRouter). Fixed a tool-call accounting defect, added a duplicate-call guard, bounded-failure reporting and tri-state capability metadata. |
+| 2026-10-21 | M3 | Safety, approvals and observability. Migration applied (3 tables, 12 policies). Backend 188 tests (13 approval-flow, 13 security), frontend 32 tests, lint/format/mypy/typecheck/build/secret scan green. Verified in a real browser against the hosted project: a high-risk tool paused the run, the exact payload was approved in the approval queue, the run resumed and only then did the business record change; the rejection path, the tampered-payload refusal, the emergency pause and the safe replay were exercised too. Closed a real gap: a model can no longer call a tool its published version was not granted. |

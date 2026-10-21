@@ -216,9 +216,12 @@ The runtime is the security boundary for tools; the model is not.
 | Rule | Enforcement |
 |---|---|
 | Only registered tools run | `app/tools/executor.py` resolves the name in the server-side registry; an unknown name is `INVALID_TOOL_ARGUMENTS` |
+| The published tool set is a boundary | The engine refuses any tool the agent version was not granted, whatever the model asks for |
 | Arguments are validated strictly | Each tool has a Pydantic input model with `extra="forbid"`; unexpected fields are rejected before execution |
 | Permissions are checked server-side | The executor compares the tool's required permissions with the caller's workspace role, never with anything the model produced |
-| Risk is classified, not guessed | `low` / `medium` / `high` per tool; a high-risk tool that changes a business record pauses the run for approval and does **not** execute |
+| Risk is classified, not guessed | `low` / `medium` / `high` / `critical` per tool; a high-risk tool that changes a business record pauses the run for approval and does **not** execute |
+| Approval is bound to the exact payload | The decision must quote the SHA-256 hash of the canonical `{tool, arguments}` payload; a changed payload is refused with `APPROVAL_MISMATCH` |
+| Approval is re-validated at execution | Before the action runs, the tool must still be in the tool set, still be allowed by the policy, and the hash must still match |
 | Results are bounded and sanitized | Tool output is size-capped and truncated before it is persisted or sent back to the model |
 | Repeats do not repeat side effects | An identical call inside one run is executed once; the repeat emits `tool.cached` and reuses the recorded result |
 | Work is bounded | Step, tool-call, wall-clock, token and cost budgets raise `EXECUTION_LIMIT_EXCEEDED`; the run then reports the actions it completed |
@@ -244,12 +247,30 @@ higher-priority configuration.
 
 ---
 
-## 11. Not yet implemented (honest list)
+## 11. Governance controls (M3)
+
+| Control | Where it is enforced |
+|---|---|
+| Tool allowlist and deny list | `services/policies.py` before the tool body runs; the deny list always wins |
+| Disabled agents | The run is refused with `POLICY_VIOLATION` |
+| Emergency pause | Every new run is refused while the workspace is paused; in-flight runs continue |
+| Workspace run quota | Counted from the persisted runs; a run beyond the quota is `RATE_LIMITED` |
+| Per-tool rate limit | Counted from the persisted `tool.request` events, per workspace and minute |
+| Tool-call override | The tighter of the agent version's limit and the workspace override wins |
+| Approval lifetime | An expired request cannot be decided and the run cannot resume through it |
+| Policy version | Stamped on the run and on every approval request, so a decision is traceable to the policy in force |
+| Audit trail | Policy changes, approval decisions, revocations, replays, cancellations and run outcomes are written to `app.audit_events` |
+
+Every control is server-side. A prompt, a tool result or a client flag can never turn one off.
+
+---
+
+## 12. Not yet implemented (honest list)
 
 | Control | Milestone |
 |---|---|---|
-| Human approvals bound to a canonical argument hash | M3 (the runtime pauses and records the hash; the decision endpoints land in M3) |
-| Tool allowlists, per-agent rate limits, workspace quotas, emergency pause | M3 |
+| Approval decisions that survive a process restart (durable worker) | M7 |
+| Per-agent tool allowlists (today: per workspace and per published version) | M3 follow-up |
 | SSRF-safe generic HTTP connector | M7 |
 | Upload validation, private buckets, signed URLs | M6 |
 | API key authentication (schema exists, handshake not wired) | M8/P1 |

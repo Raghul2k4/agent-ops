@@ -616,22 +616,52 @@ hosted cloud model (`dots-studio/dots-3-note-preview:free` on OpenRouter).*
 
 ---
 
-### M3 — Runtime safety, approvals, observability (spec Phase 3)
+### M3 — Runtime safety, approvals, observability (spec Phase 3) — *complete, tested*
 
-- [ ] Policy engine: allowlists, budgets, rate limits, max steps/duration/spend, emergency pause,
-      agent disable switch, policy-version stamping
-- [ ] Approval lifecycle: create → pending → approve/reject/request-changes; canonical hash binding;
-      expiry; re-validation at execution; mismatch rejection; reviewer permissions
-- [ ] Tool executor: strict validation, timeout, sanitized result persistence, idempotency keys,
-      controlled error categories, concurrency limits
-- [ ] Runs & Traces UI: filterable history, run detail, hierarchical trace timeline, span inspector,
-      cancel, safe replay (dry-run default, linked to the source run)
-- [ ] Realtime live updates with cursor-based recovery
-- [ ] Error taxonomy surfaced consistently in UI + audit events
-- [ ] Security test suite (Plan §9 table) + RLS policy regression tests in `supabase/tests/`
+Backend
+- [x] Policy engine: one workspace policy document (tool allow/deny lists, disabled agents,
+      approval risk thresholds, per-tool rate limits, tool-call override, run quota, approval TTL,
+      emergency pause), versioned and stamped on every run and approval
+- [x] Approval lifecycle: propose → pending → approve / reject / request-changes, plus revoke;
+      canonical hash binding, expiry, duplicate rejection, reviewer permissions, audit events
+- [x] Resume after a decision: the runtime stores a checkpoint (`app.run_checkpoints`) with the
+      conversation and the pending call, so an approved run continues exactly where it paused
+- [x] Re-validation at execution time: the tool must still be in the version's tool set, still be
+      allowed by the policy, and the payload hash must still match the approved one
+- [x] Tool executor hardening: preparation (resolve → authorize → validate) split from execution,
+      so the approval hash is computed from the same canonical arguments that execute
+- [x] The published tool set is a boundary: a model cannot call a tool its version was not granted
+- [x] Runs and traces: server-side filters (status, agent, model, tool, error category, date range),
+      safe replay in replay mode, cursor-based event recovery
+- [x] Realtime live updates: the client consumes the SSE stream with the bearer token and recovers
+      missed events with the sequence cursor
+- [x] Error taxonomy extended: `APPROVAL_MISMATCH`, `APPROVAL_REJECTED`; every failure is audited
 
-**Exit:** executions are bounded, inspected, and controlled; protected actions require a valid approval.
-**Verify:** `tests/security/*`, `tests/integration/test_approval_flow.py`, `supabase db lint`.
+Frontend
+- [x] Approvals queue: pending first, the exact arguments, the payload hash, expiry, risk, the
+      originating run, and approve / reject / request-changes with a reviewer note
+- [x] Execution policy editor: emergency pause, tool allow/deny lists, approval thresholds, the
+      tool-call override, the run quota and the approval lifetime
+- [x] Run detail: the approval banner with a link to the queue, the safe-replay action and the
+      replay/source-run links
+- [x] Runs history: server-side filters for status, error category, tool and start date
+- [x] Live event stream with cursor recovery in the run detail
+
+**Exit:** executions are bounded, inspected and controlled; protected actions require a valid
+approval. — *Met: a high-risk tool pauses the run, a reviewer decides the exact payload in the
+browser, the run resumes and only then does the business record change.*
+**Verify:** `backend/tests/integration/test_approval_flow.py` (13 cases),
+`backend/tests/security/test_security_boundaries.py` (13 cases), the full backend suite (188 tests)
+and the RLS regression checks.
+
+**M3 findings carried forward**
+- A paused run reports a wall-clock duration that includes the human review time. The start and
+  completion timestamps are both persisted, so the pause is visible rather than hidden.
+- Approvals are decided in-process: the decision schedules the resume as a background task. A
+  process restart between the decision and the resume leaves the run paused; the durable worker
+  (M7) will pick it up.
+- The pause/resume checkpoint stores the conversation in the run's own database row. A very long
+  conversation would need a different store; the checkpoint is bounded by the run's step budget.
 
 ---
 
